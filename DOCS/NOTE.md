@@ -67,3 +67,56 @@ nvcc -std=c++17 -arch=sm_75 CH00/device_probe.cu -o build/CH00/device_probe && .
 ### 八股自测
 
 为什么这份 `.cu` 程序不需要自己写 GPU kernel？`cudaGetDeviceProperties` 的返回值与 `prop` 各承载什么信息？待用户自行解释。
+
+## 2026-09-20 Ch01：第一个计算 kernel
+
+### 今日完成任务
+
+用户要求生成 Ch01 内容，随后明确要求“解题并编译”。Codex 提供并补全 [vector_add.cu](../CH01/vector_add.cu)，完成编译和运行，用户尚未提供独立实现或个人解释。程序对两个长度为 256 的 float32 数组逐元素相加，全部元素与 CPU reference 一致，最大绝对误差为 0。结果见 [章节记录](chapters/01_first_kernel.md)，本次总结不重复运行实验。
+
+### 基本概念
+
+<mark>本章的核心是 CPU 准备数据、GPU 执行计算、CPU 回读并验证结果。</mark> host 指 CPU 一侧，device 指 GPU 一侧。程序中的 `h_a/h_b/h_c` 保存 CPU 数据，`d_a/d_b/d_c` 指向 GPU 分配的空间；这些前缀是命名约定。完整流程为：
+
+```text
+CPU 准备输入与参考答案
+  → cudaMalloc 分配 GPU 空间
+  → cudaMemcpy（H2D）拷贝输入
+  → 启动 vector_add kernel
+  → cudaDeviceSynchronize 等待完成
+  → cudaMemcpy（D2H）回读输出
+  → CPU 逐元素校验
+  → cudaFree 释放 GPU 空间
+```
+
+kernel 是交给 GPU 线程执行的函数。本程序的 `main()` 和普通循环在 CPU 上运行，`__global__` 标记的 `vector_add()` 在 GPU 上运行。启动代码 `vector_add<<<1, n>>>(d_a, d_b, d_c)` 使用一个 block、256 个线程；block 先理解成一组线程。传入的是 GPU 数组指针，与本程序显式分配和拷贝的方式对应。
+
+```cpp
+__global__ void vector_add(const float* a, const float* b, float* c) {
+    const int i = threadIdx.x;
+    c[i] = a[i] + b[i];
+}
+```
+
+<mark>每个线程执行同一段代码，通过不同的编号处理不同元素。</mark> `threadIdx.x` 是线程在当前 block 内的 x 方向编号，本章为 0～255。线程 3 计算 `a[3] + b[3] = 1.5 + 1.75`，写入 `c[3] = 3.25`。无需在 kernel 中写一个遍历全部元素的循环；也不能由此推定 256 个线程物理上同时执行。
+
+当前索引只适用于本章固定的一个 block、256 个元素与 256 个线程配置。多个 block 的索引及越界保护留到 Ch02，不直接增大启动规模套用这份代码。
+
+`cudaMalloc` 和 `cudaMemcpy` 的大小参数以字节计，256 个 float 对应 1024 字节。`cudaMemcpy` 的参数顺序为目标、来源、字节数、方向。本程序通过 `cudaDeviceSynchronize` 显式等待计算结束，再回读结果；提交 kernel 不等于计算已经完成，详细异步机制留到后续。
+
+<mark>运行不报错还不够，要把 GPU 结果与 CPU 参考答案逐元素比较。</mark> 本程序检查全部 256 项，前四项打印仅用于观察，容限为 `1e-6`，NaN/Inf 也判失败。此次 PASS 证明当前输入的计算正确；没有计时，不能据此判断 GPU 比 CPU 快。
+
+修改源码后需重新编译。在项目根目录执行：
+
+```bash
+mkdir -p build/CH01
+nvcc -std=c++17 -arch=sm_75 -Xcompiler=-Wall,-Wextra CH01/vector_add.cu -o build/CH01/vector_add && ./build/CH01/vector_add
+```
+
+### 踩坑记录
+
+未收到用户运行错误或具体误解。教学预检中的原始骨架把输出写为零，因此校验 FAIL，是预设的未完成练习状态；随后补全计算后 PASS，不属于环境故障，也不记为用户犯错。
+
+### 八股自测
+
+从 CPU 准备输入到 CPU 验证输出，数据经过哪些步骤，哪个函数在 GPU 上执行？同一段 kernel 代码如何让线程 3 与线程 4 分别处理不同元素？待用户用自己的话解释。
