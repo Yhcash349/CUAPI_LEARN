@@ -27,3 +27,7 @@ GTX 1650 没有 Tensor Core，因此 Tensor Core 加速不列为本机实践目�
 正式预检还应记录 `cmake --version`、`gcc --version`，并检查 Compute Sanitizer；这些不在此前已验证清单内。Graph、async allocator、VMM、框架实验均 `NOT RUN`，按课程实际用到时测试。Driver/Toolkit/应用链接 Runtime/框架自带 Runtime 版本分别记录；不需要仅因 UMD 13.3 而升级 Toolkit。
 
 硬件边界参考 [NVIDIA GTX/RTX 说明](https://blogs.nvidia.com/blog/whats-the-difference-between-nvidia-rtx-and-gtx/) 与 PLAN 中的官方资料。未来报告保存到 `reports/`，在本页或单章记录写准确路径；历史临时文件丢失时写明证据不可重读，不能伪造恢复结果。
+
+## 2026-09-20 Ch03 补充核验
+
+本次复核 NVCC 12.9.86、GTX 1650 / CC 7.5，并首次实际核验 Compute Sanitizer 2025.2.1.0。`memcheck --padding 32 --error-exitcode 99` 对 Ch03 正常案例和临时修复版报告零错误，对故意越界写入报告源码与线程位置；命令、退出码及原始输出见 `reports/CH03/preflight.txt`，解释见 [Ch03](chapters/03_error_check.md)。仅验证本章 memcheck 路径，不代表 racecheck 等其他功能已验证。当前 Git 已存在，早期“尚未初始化 Git”仅为历史快照；本次未初始化、提交或推送。
