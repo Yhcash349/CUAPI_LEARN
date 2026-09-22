@@ -178,3 +178,60 @@ nvcc -std=c++17 -arch=sm_75 -lineinfo -Xcompiler=-Wall,-Wextra CH02/thread_index
 ### 八股自测
 
 为什么多个 block 时只使用 `threadIdx.x` 不够？N=1000、每 block 128 线程时，为什么需要 8 个 block，最后一组哪些线程应跳过数组访问？待用户自行解释。
+
+## 2026-09-22 Ch03：CUDA 错误检查与 Sanitizer 定位
+
+### 今日完成任务
+
+围绕 [error_check.cu](../CH03/error_check.cu) 阅读 host 检查与三种实验模式。用户在 Codex 讲解和代码示例辅助下修改检查宏及两处检查点，并贴出非法启动、memcheck 越界的终端输出。现场源码已使用 `#call` 和两处 `CUDA_CHECK`，故意越界写入仍保留；尚无修复后用户运行结果或个人复述，不记为完全独立实现。实验依据及待办见 [RECORD](RECORD.md) 的同日 Ch03 条目。
+
+### 基本概念
+
+<span style="color:red">用户提问：为什么 include 这些头文件？check_cuda 如何实现？call 到底怎么理解？</span>
+
+`#include` 引入函数和类型等声明或定义。`cuda_runtime.h` 提供 CUDA 接口；`algorithm` 用于 `std::max`；`cmath` 用于绝对误差和有限值检查；`cstdio` 用于打印与刷新输出；`cstdlib` 用于退出程序；`cstring` 用于比较模式字符串；`vector` 保存 CPU 端数组。
+
+`check_cuda` 在 CPU 上检查传入的 `cudaError_t`：成功则返回，失败则打印调用、文件、行号和错误文字，随后 `std::exit(EXIT_FAILURE)` 结束程序。它不会自动等待 GPU，能检查什么由传入 API 的返回值决定。
+
+```cpp
+#define CUDA_CHECK(call) check_cuda((call), #call, __FILE__, __LINE__)
+```
+
+<mark>`call` 是宏参数名，代表传入的代码；`(call)` 执行该调用，`#call` 将同一段代码转换为报错用的字符串。</mark> 例如传入 `cudaMalloc(&d_a, bytes)`，实际调用只求值一次，字符串不执行。`__FILE__` 和 `__LINE__` 标记宏调用位置。`cudaGetErrorName(status)` 将状态码转为名称，`cudaGetErrorString(status)` 给出英文说明，最终由 `fprintf` 拼接打印。
+
+<span style="color:red">用户提问：模式选择、设备属性查询和结果输出各在做什么？</span>
+
+`argc` 包含程序名，`argv[1]` 是用户传入的模式；不传时默认 `ok`，`strcmp` 返回 0 表示相等。`ok` 用 256 个线程处理 256 项；`launch` 将 block 线程数设为设备上限加 1；`oob` 在正常计算之外额外写 `c[n]`。`fflush(stdout)` 刷新 CPU 输出，不等待 GPU。程序校验全部 256 项，前四项打印仅便于观察，末尾 `cudaFree` 释放 GPU 数组。
+
+<mark>启动检查通过不代表执行完成；数值校验通过也不代表没有越界。</mark> `cudaGetLastError()` 读取并清除当前 host 线程对应 Runtime 的最后错误记录，不等待 GPU，且可能报告之前异步调用的错误；`cudaDeviceSynchronize()` 等待 GPU 并检查返回值。报错所在 API 是发现错误的检查点，未必是故障源头。参考 [CUDA Runtime API 12.9：Error Handling](https://docs.nvidia.com/cuda/archive/12.9.0/cuda-runtime-api/group__CUDART__ERROR.html)。
+
+<span style="color:red">用户提问：Compute Sanitizer 做什么，命令参数是什么意思，与 nsys 有什么区别，还有哪些工具？</span>
+
+```bash
+compute-sanitizer --tool memcheck --padding 32 --error-exitcode 99 ./build/CH03/error_check oob
+```
+
+该命令在工具监测下运行程序的 `oob` 模式。`--tool memcheck` 选择内存检查；`--padding 32` 为分配添加 32 字节保护间隔，这些字节不属于程序可合法使用的空间；`--error-exitcode 99` 让应用成功退出但工具发现错误的情况也以非零码返回。`99` 是此命令指定的退出码，不是报告中 CUDA 错误码 `999`。
+
+| 工具 | 本轮需要知道的检查范围 |
+| --- | --- |
+| `memcheck` | 越界、未对齐访问等；泄漏检查需按选项启用 |
+| `racecheck` | shared memory 数据访问冲突，不是通用 global memory 竞争检测器 |
+| `initcheck` | GPU global memory 未初始化读取 |
+| `synccheck` | 同步原语的非法使用 |
+
+一次 `--tool` 选择一种检查，不会自动运行全部工具。<mark>Compute Sanitizer 查执行正确性，Nsight Systems 查时间花在哪里以及 CPU/GPU 如何配合。</mark> nsys 可观察 API、kernel、拷贝时间线与重叠，不能替代逐次访存合法性检查；Sanitizer 有运行开销，不用其运行耗时衡量性能。零错误仅覆盖本次执行和所选工具的检查范围，算法结果仍需 reference 校验。工具边界参考 [Compute Sanitizer](https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html) 与 [Nsight Systems](https://docs.nvidia.com/nsight-systems/UserGuide/index.html)，本日未实际运行其余三种检查或 nsys。
+
+### 踩坑记录
+
+<span style="color:red">用户提问：cudaErrorInvalidConfiguration 从哪里来？越界报告如何帮助定位？</span>
+
+用户贴出的 `launch` 输出为 block=1025、设备上限=1024。非法配置导致 Runtime 记录错误，`cudaGetLastError()` 取出状态码，检查函数打印 `cudaErrorInvalidConfiguration (invalid configuration argument)`；不是第 77 行检查函数自己制造了错误。
+
+用户贴出的 memcheck 报告指向 `error_check.cu:33`、block 0 的线程 0、4 字节 global 写入，对应 `c[256] = 123.0f`。数组只有 256 个 float，共 1024 字节，合法下标为 0～255。访问地址 `0x603401000` 正好等于起点 `0x603400c00 + 0x400`；“1 bytes after”指访问起点位于最后合法字节之后，不代表只写了 1 字节。
+
+后续 `cudaDeviceSynchronize()` 报 `cudaErrorUnknown (999)`，此次 `ERROR SUMMARY: 2 errors` 对应非法写入及随后 API 报错，不证明有两处独立越界。<mark>先读第一条具体错误，再找源码行、线程和地址范围；修复根因后重新编译、重新检查。</mark> 这是预设故障实验，不记为用户无意写错，也不能将本次错误名称推广为所有越界的固定返回值。
+
+### 八股自测
+
+`CUDA_CHECK(cudaMalloc(...))` 中调用文字、实际返回值和源码位置分别从哪里来？为什么 launch 检查通过后，memcheck 仍能报告越界，且同步处可能再次报错？待用户用自己的话解释。

@@ -19,7 +19,7 @@ static void check_cuda(cudaError_t status, const char* api,
 
 // TODO(CH03-1)：把固定描述替换成宏参数 call 的源码文字；提示：预处理器的 #call。
 // 当前宏仍会执行和检查 API，但报错不能显示具体调用。call 只应求值一次。
-#define CUDA_CHECK(call) check_cuda((call), "TODO: CUDA expression", __FILE__, __LINE__)
+#define CUDA_CHECK(call) check_cuda((call), #call, __FILE__, __LINE__)
 
 // GPU 入口：复用 Ch01 的单 block 相加，oob 模式额外制造一次边界外写入。
 __global__ void vector_add(const float* a, const float* b, float* c, int n, bool oob) {
@@ -74,10 +74,10 @@ int main(int argc, char** argv) {
     std::fflush(stdout);
     vector_add<<<1, threads>>>(d_a, d_b, d_c, n, oob);
     // TODO(CH03-2)：将下面两条旧式检查改成 CUDA_CHECK(...)，保留各自检查的 API。
-    check_cuda(cudaGetLastError(), "vector_add launch", __FILE__, __LINE__);
+    CUDA_CHECK(cudaGetLastError());
     std::puts("Launch check passed; this does not prove execution completed.");
     std::fflush(stdout);
-    check_cuda(cudaDeviceSynchronize(), "vector_add execution", __FILE__, __LINE__);
+    CUDA_CHECK(cudaDeviceSynchronize());
     std::puts("Synchronization check passed; use memcheck to check allocation bounds.");
     CUDA_CHECK(cudaMemcpy(h_c.data(), d_c, bytes, cudaMemcpyDeviceToHost));
 
