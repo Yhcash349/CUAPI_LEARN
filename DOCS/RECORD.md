@@ -15,7 +15,7 @@
 | 02 线程索引 | RUNNING | 45～60min | — | 未评估 | Codex 完整答案 | 正式程序 1000 项通过、最大误差 0、memcheck 零错误；用户解释待验收 |
 | 03 错误检查 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、讲解与修改示例 | 当前源码已完善宏和两处检查点；用户贴出 launch 与 memcheck 越界输出，修复复测及个人解释待验收 |
 | 04 正确计时 | RUNNING | 45～60min | — | 未评估 | 保留已有预热设置，Codex 补全 Event 与验证 | 正式程序 1000 项通过、最大误差 0、计时 PASS；个人解释待验收 |
-| 05 NSYS | TODO | 45～60min | — | 未评估 | 未开始 | — |
+| 05 NSYS | RUNNING | 45～60min | — | 未评估 | Codex 源码、讲义、排障与读图讲解 | 用户 _02 采集与 GUI 读图已有报告/截图；三类活动已验证，个人解释待验收 |
 | 06 warp 执行 | TODO | 45～60min | — | 未评估 | 未开始 | — |
 | 07 合并访存与 NCU | TODO | 45～60min | — | 未评估 | 未开始 | — |
 | 08 shared 与同步 | TODO | 45～60min | — | 未评估 | 未开始 | — |
@@ -193,3 +193,43 @@ Ch04 状态 READING，辅助程度为骨架、提示与预检；用户本次仅�
 复核 GTX 1650 / CC 7.5、NVCC 12.9.86；按讲义命令编译正式源码无警告。N=1000、float32、grid=8、block=128，全部元素通过、最大绝对误差 0、warmup=10、samples=21、batch=100，计时 PASS、退出 0。本次中位数：CPU 加法 0.781000 μs，GPU 含传输 host 时间 161.777000 μs，Event 批次平均每次启动时间 9.461120 μs。证据见 `reports/CH04/completed-2026-09-28.txt`。这不是与历史预检的配对 A/B，不将跨日差异当作优化结论；没有运行 Sanitizer、NSYS 或 NCU。
 
 状态改为 RUNNING，辅助程度明确为保留已有预热设置、Codex 补全与验证；用户此前提问和代码讲解不替代个人解释验收，未记 DONE。学习与工程实际用时均未记录。剩余验收为解释 CPU 计时等待的原因及 Event 与含传输总时间的范围。检查 diff 格式和章节本地链接；遵循 PLAN 中明确请求可提供完整实现的规则，无教学范围偏离，无需额外 Claude 审阅，未提交或推送 Git。
+
+## 2026-09-28：Ch05 NSYS 内容与采集预检
+
+用户明确要求“生成CH05内容”。新增 [Ch05 讲义](chapters/05_nsys.md)，按 PLAN 阶段 A 直接采集已有 `CH02/thread_index.cu`，以单次 vector add 对应 CPU API、GPU memcpy 与 kernel 三类轨迹。复用完整 host、输入和校验，不复制源码或新增 kernel；本章用户练习为采集命令、三类轨迹定位与源码对应解释。构建独立输出到 `build/CH05/vector_add`。同步 PLAN 的目录说明与本次准备依据，前章未完成验收保留，无课程范围偏离。
+
+Codex 复核 GTX 1650 / CC 7.5、驱动 610.88、NVCC 12.9.86、NSYS 2026.4.1；按讲义编译无警告，普通运行与采集运行均退出 0，N=1000、float32、grid=8、block=128，全量校验通过、最大绝对误差 0。`nsys profile --trace=cuda --sample=none --cpuctxsw=none` 成功生成报告；API/kernel/memory 汇总与 API/GPU 逐条 trace 命令均退出 0。实测 1 次 vector_add、2 次 H2D（共 8000 字节）、1 次 D2H（4000 字节），另有一次清零（4000 字节），顺序与源码一致。kernel 与 launch 的关联编号均为 124。单次 kernel 2176 ns 仅作读表证据，不作正常计时、稳态性能或优化 A/B 结论。
+
+命令、原始输出和退出码见 `reports/CH05/preflight.txt`；正式预检报告为 `reports/CH05/preflight-2026-09-28.nsys-rep`，同名 `.sqlite` 为工具派生数据。均按现有规则留在本地，保留作复盘证据。GUI 打开与人工点选 NOT RUN，讲义提供已验证的 CLI 替代路线；未运行 Sanitizer、NCU 或性能 A/B。辅助查询曾把多个报告名传给 `--help-reports`，收到 `UNKNOWN REPORT`；改用单报告帮助后取得说明，不影响已通过的多报告 `--report` 采集分析流程。
+
+Ch05 为 READING，辅助程度为 Codex 讲义、命令与预检；用户本次仅提出生成要求，个人采集和解释尚待验收。计划学习 45～60 分钟，实际学习与工程准备/agent 执行耗时均未记录。NOTE 不提前添加未学习内容。检查 diff 格式、章节链接与证据路径；下一步用户按讲义先预测，再采集自己的报告并解释三类轨迹。例行课程准备无需额外 Claude 审阅，未启动 Claude，未提交或推送 Git。
+
+## 2026-09-28：补齐 Ch05 独立目录
+
+用户明确要求即使复用前章代码也单独创建章节目录，方便按章查看。新增 `CH05/vector_add.cu`，从 Ch02 复制完整程序，补充本章用途注释；讲义链接与编译命令改用 CH05。PLAN 写明后续每章均保留独立源码目录，并替代先前直接引用 CH02 的安排。原 Ch02 文件保留。
+
+独立源码编译无警告；普通运行与 NSYS 采集均退出 0，1000 项 float32 全量通过、最大误差 0。汇总验证 1 次 kernel、2 次 H2D、1 次 D2H、1 次 memset。证据为 `reports/CH05/standalone-2026-09-28.txt` 与同前缀 `.nsys-rep`、`.sqlite`；旧预检报告保留。检查文档链接与 diff 格式。Ch05 保持 READING，复制、注释与验证均由 Codex 完成，不新增用户掌握证据；实际学习与工程耗时未记录。GUI 未验证，无需额外 Claude 审阅，未提交或推送。
+
+## 2026-10-08：Ch05 GUI 与采集版本排查
+
+用户反馈 nsys-ui 启动时 OpenGL/ZINK/EGL 错误。核对本机脚本，GUI 实际为 2025.1.3，当前 Codex PATH 中 CLI 为 2026.4.1；用户报告的诊断记录加载 2025.1.3 CUPTI 库，并提示驱动 13.3 不受该版本支持。用户报告包含 CPU API，缺少 GPU kernel/memcpy 数据，不能据报告存在就验收完整采集。
+
+临时软件渲染启动探测使用 LIBGL_ALWAYS_SOFTWARE=true GALLIUM_DRIVER=llvmpipe，进程退出 0，原 ZINK/EGL 警告未重现；窗口与报告显示未人工验证。Codex 用已安装 2026.4.1 CLI 重采集到 reports/CH05/repair-20261008.nsys-rep，应用 N=1000、float32、grid=8、block=128、全量 PASS、最大误差 0，采集退出 0；stats 验证 1 kernel、2 H2D、1 D2H、1 memset。诊断依据与命令见 reports/CH05/repair-20261008-diagnostics.txt，派生 SQLite 留作复盘，用户原报告保留。讲义补入实际 GUI/CLI 版本差异、软件渲染与显式 CLI 路径。
+
+Ch05 改为 RUNNING，用户已尝试采集和打开 GUI，完整 GPU 数据采集及个人解释待验收；Codex 重采集不替代用户完成。学习和工程实际用时未记录；未安装或升级工具、未运行性能 A/B。
+
+## 2026-10-08：用户新版报告验证与 GUI 读图指导
+
+用户提供 Windows Nsight Systems 2026.4.1 截图，当前活动标签仍为 user_20261008_01，左侧已选中 _02；说明 GUI 已成功打开旧报告，不能据此认定新报告已显示。现场使用 2026.4.1 stats 检查用户生成的 reports/CH05/user_20261008_02.nsys-rep，成功导出同名 SQLite，验证 CPU API 汇总及 GPU 数据：1 次 vector_add、2 次 H2D（共 8000 字节）、1 次 D2H（4000 字节）、1 次 memset。CPU 汇总中 cudaMalloc 3 次、cudaMemcpy 3 次、cudaLaunchKernel 1 次、cudaDeviceSynchronize 1 次、cudaFree 3 次。kernel 单次采集 duration=2176 ns，仅用于说明秒级视图下短事件难以辨认。
+
+本次为用户新报告的实际验证，取代之前用户报告缺 GPU 数据的当前状态；原报告仍保留。已针对活动标签、Events View 列表、横向时间缩放与纵向轨道大小的区别准备操作指导，个人轨迹定位和解释尚待反馈。Ch05 保持 RUNNING，不标 DONE；未改源码或重新采集，实际学习及工程用时未记录。
+
+用户随后提供 `_02` 的 GUI 截图，已展开 GPU 与 CPU 轨道并显示 API 事件列表，但未找到 `cudaLaunchKernel` 名称。核对同报告 API/GPU trace：GUI API 列表第 8 行 `vector_add(...)` 的起点与 450.575 μs 时长精确对应 CLI 的 cudaLaunchKernel，关联编号 124；GPU vector_add 同编号、2.176 μs。讲义补入 GUI 显示名称区别，解释轨道树与父子百分比，未将用户提问视为个人解释验收。
+
+## 2026-10-08：Ch05 本章总结
+
+按用户“总结本章内容”的要求，在 NOTE 新增本日 Ch05 条目，整理本章数据流、编译/采集命令、三类轨迹、Events View 与缩放、源码与关联编号对应、API/GPU 耗时边界及 CPU/GPU 时间重叠。保留用户真实追问：找不到 cudaLaunchKernel、每行含义、拷贝方向、A/B 同大小却时长不同、GPU 是否等待 CPU 进程结束、绿色条宽度含义。排障只保留本章必要的工具版本与数据缺失边界，不扩展首轮范围。
+
+用户已有实际新版报告与 GUI 操作截图；源码、采集命令、工具排障、报告核对及解释由 Codex 辅助。引用本日已验证的 `_02` 报告及其 SQLite，A/B/C 均 4000 字节，CPU API 分别为 454.982/57.448/73.237 μs，GPU 拷贝分别为 2.208/1.344/2.656 μs。用户观察与追问继续如实记录，不将疑问本身视为独立解释通过；Ch05 保持 RUNNING，待个人复述后再验收 DONE。学习与工程实际用时均未记录。
+
+本次仅更新 NOTE 与 RECORD，检查新增笔记的本地链接和 diff 格式；没有重新编译、采集、计时或执行 GPU 程序，未新增性能或内存安全结论。保留已有源码、讲义与报告，无计划偏离，无需额外 Claude 审阅，未提交或推送。
