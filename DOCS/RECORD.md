@@ -16,7 +16,7 @@
 | 03 错误检查 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、讲解与修改示例 | 当前源码已完善宏和两处检查点；用户贴出 launch 与 memcheck 越界输出，修复复测及个人解释待验收 |
 | 04 正确计时 | RUNNING | 45～60min | — | 未评估 | 保留已有预热设置，Codex 补全 Event 与验证 | 正式程序 1000 项通过、最大误差 0、计时 PASS；个人解释待验收 |
 | 05 NSYS | RUNNING | 45～60min | — | 未评估 | Codex 源码、讲义、排障与读图讲解 | 用户 _02 采集与 GUI 读图已有报告/截图；三类活动已验证，个人解释待验收 |
-| 06 warp 执行 | TODO | 45～60min | — | 未评估 | 未开始 | — |
+| 06 warp 执行 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、讲解与两处练习补全 | 正式校验、memcheck、计时及 NCU 动态分歧检查通过；用户已有 Source/SASS 关联截图，个人解释验收待补齐 |
 | 07 合并访存与 NCU | TODO | 45～60min | — | 未评估 | 未开始 | — |
 | 08 shared 与同步 | TODO | 45～60min | — | 未评估 | 未开始 | — |
 | 09 bank conflict | TODO | 45～60min | — | 未评估 | 未开始 | — |
@@ -233,3 +233,75 @@ Ch05 改为 RUNNING，用户已尝试采集和打开 GUI，完整 GPU 数据采�
 用户已有实际新版报告与 GUI 操作截图；源码、采集命令、工具排障、报告核对及解释由 Codex 辅助。引用本日已验证的 `_02` 报告及其 SQLite，A/B/C 均 4000 字节，CPU API 分别为 454.982/57.448/73.237 μs，GPU 拷贝分别为 2.208/1.344/2.656 μs。用户观察与追问继续如实记录，不将疑问本身视为独立解释通过；Ch05 保持 RUNNING，待个人复述后再验收 DONE。学习与工程实际用时均未记录。
 
 本次仅更新 NOTE 与 RECORD，检查新增笔记的本地链接和 diff 格式；没有重新编译、采集、计时或执行 GPU 程序，未新增性能或内存安全结论。保留已有源码、讲义与报告，无计划偏离，无需额外 Claude 审阅，未提交或推送。
+
+## 2026-10-08：Ch06 warp 执行内容与骨架预检
+
+用户明确要求“生成CH06内容”。按 PLAN 阶段 B 新增 [CH06/warp_branch.cu](../CH06/warp_branch.cu) 和 [章节说明](chapters/06_warp_execution.md)，复用 Ch02 索引、Ch03 检查和 Ch04 Event 计时方式。正式源码保留两处练习：计算 lane/block 内 warp 编号，以及填写 warp 内/warp 间分路条件。Codex 提供 host、输入、独立 CPU reference、两条整数计算路径、校验和成对计时框架；只改变线程走 A/B 的分组方式，不引入新依赖、shared 协作或 NCU 教学。PLAN 同步目录和准备依据，NOTE 不提前记录未实际学习的内容。
+
+现场复核 GTX 1650 / CC 7.5 / warpSize=32 / 4096 MiB、驱动 610.88、NVCC 12.9.86、Compute Sanitizer 2025.2.1.0。正式练习版和临时补全版均编译无警告。正式 probe 的 64 项编号不符，check/bench 每种分支模式 32768 项不符、计时 NOT RUN、退出 1，均为占位预期。临时补全 probe 全部 64 项正确，两个分支模式各 65536 项全部正确、整数误差为 0，三个模式均退出 0；临时 probe/check 的 memcheck 均零错误、退出 0。
+
+普通计时与 Sanitizer 分开运行：N=65536、uint32、grid=256、block=256、iterations=256；每模式预热 10 次、21 个样本、每批 5 次启动，轮换两模式先后顺序。Event 批次平均每次启动中位数为 within_warp 109.081602 μs、between_warps 65.171200 μs。本机此次 warp 内分路较慢；测量不含传输和校验，仍可能包含 host 提交间隙及两种条件计算开销，不作为纯分歧成本或固定减速比例证明。
+
+教学方对临时补全版执行 cuobjdump --dump-sass：branch_work 在 0x340 保留条件 BRA，0x360/0x3a0 分别 CALL 两条不同计算体，计算体保留乘加、移位和循环，输出经 STG 写出。结合全量正确性，确认本次对照未被消除或合并成同一计算路径；静态检查不代替动态计数或逐周期调度证据，相关指令不计入学生必学。证据为 `reports/CH06/preflight-2026-10-08.txt` 与 `reports/CH06/completed-sm75.sass.txt`，正式可执行文件为 `build/CH06/warp_branch`；临时补全源码及二进制已清理。NSYS/NCU 本章 NOT RUN。
+
+Ch06 为 READING，用户本次仅提出生成需求，实际代码练习、运行和个人解释待验收，不记 DONE；前章个人解释和 Ch03 修复复测等遗留项保留。计划学习 45～60 分钟，实际学习用时与工程准备/agent 执行耗时均未记录。校对章节链接、diff 格式和预检证据；无计划范围偏离，无需额外 Claude 审阅，未启动 Claude、未提交或推送 Git。下一步用户按讲义先预测、填 TODO 1 后编译 probe，再填 TODO 2、重新编译 check/bench，最后解释结果与计时边界。
+
+## 2026-10-14：Ch06 编号练习 TODO 1 补全
+
+用户指定 `CH06/warp_branch.cu` 的 `probe_warps()` 并要求“完成todo并解释功能”。Codex 仅补全该函数的编号计算：lane=`t % warpSize`，warp_in_block=`t / warpSize`，添加一维 block 的分组注释；保留 GPU 数组写入和少量 printf。讲义同步当前完成范围、运行入口及验证，TODO 2 的分路条件保留。无课程范围偏离，无新增依赖或其他 kernel 修改。
+
+使用章节 nvcc 命令编译正式源码，无警告；NVCC 12.9.86、GTX 1650 / CC 7.5 / warpSize=32，正式 probe 校验全部 64 项通过、mismatches=0、退出 0。正式 probe 的 `compute-sanitizer --tool memcheck --padding 32 --error-exitcode 99` 报告零错误、退出 0。证据为 `reports/CH06/probe-completed-2026-10-14.txt`；本次没有运行 check/bench、计时、NSYS 或 NCU，不新增分支性能结论。
+
+用户完成部分为指定代码并要求补全；实现、编译和 GPU 验证由 Codex 完成，个人解释尚未验收。Ch06 保持 READING，TODO 2 与全章验收待完成，未标 DONE；实际学习用时及工程准备/agent 执行耗时未记录。例行局部补全无需额外 Claude 审阅，未启动 Claude、未提交或推送 Git；此前已有工作区改动保留。
+
+## 2026-10-20：Ch06 分路练习 TODO 2 补全与正式验证
+
+用户指定 `CH06/warp_branch.cu` 的 `choose_path_a()` 并要求“完成todo”。Codex 使用 block 内线程编号计算 lane/warp：mode=0 按 `lane < 16` 将同一 warp 分为 A/B 两半，mode=1 按 `warp_in_block % 2 == 0` 将完整 warp 分到 A/B；移除占位语句，更新正确性失败提示。保留此前 TODO 1 的正式实现，未改变输入、CPU reference、计算体或计时配置。讲义同步完成范围与运行方式，PLAN 更新目录注释，无计划范围偏离。
+
+NVCC 12.9.86、GTX 1650 / CC 7.5 / warpSize=32 / 4096 MiB、驱动 610.88。按章节命令编译正式源码，无警告；probe 全部 64 项通过，check/bench 的两模式各 65536 项全量正确、mismatches=0，均退出 0。正式 check 的 memcheck 零错误、退出 0。正常计时使用 N=65536、uint32、grid=256、block=256、iterations=256；每模式预热 10 次、21 个样本、每批 5 次启动并轮换模式顺序。Event 批次平均每次启动中位数为 within_warp 113.785601 μs、between_warps 65.478402 μs，Timing PASS；本机本次 warp 内分路较慢，不将总差值归为纯分歧开销，不与历史数值作配对优化结论。
+
+检查正式完成版 SASS：branch_work 的 0x270 条件 BRA、0x290/0x2d0 两路 CALL、计算体整数计算与循环、0x320 STG 输出均保留，未消除两路对照；静态产物不代替动态分歧计数。证据为 `reports/CH06/completed-2026-10-20.txt` 和 `reports/CH06/completed-2026-10-20-sm75.sass.txt`；Sanitizer 与正常计时分开，NSYS/NCU 本次 NOT RUN。无临时补全源码或二进制，正式 build 和报告保留复盘。
+
+Ch06 改为 RUNNING，辅助程度为 Codex 提供框架、讲解和按要求补全两处练习；用户本次指定修改，未新增独立实现或个人解释验收证据，未标 DONE。实际学习与工程准备/agent 执行耗时均未记录。剩余验收为用户结合实际输出解释 warp/lane、两种模式的分路与计时边界。无需额外 Claude 审阅，未启动 Claude、未提交或推送 Git，先前工作区改动保留。
+
+## 2026-10-20：Ch06 观察指令与 NSYS 时间线预检
+
+用户要求提供指令，直观观察两个 path 整体流程的耗时差异。依据当前代码明确对照单位为两种 A/B 分路安排，保留 Event 不含分配/传输/校验的边界；现有程序未按模式单独测含传输的 host 端到端时间。本次不改源码，讲义补充普通 check/bench 与独立 NSYS 采集指令，并说明两种模式共用 branch_work 名称，通过当前启动顺序定位，不把内部 path_a/path_b 当成独立 kernel。
+
+正式源码按原命令编译无警告；普通 check 两模式各 65536 项全部正确，bench warmup=10、samples=21、batch=5，Event 批次平均每次启动中位数为 within_warp 116.083205 μs、between_warps 71.097600 μs，均退出 0。该观察沿用 GTX 1650、uint32、N=65536、grid/block=256、iterations=256，仅反映当前微基准，不把跨次运行差异当优化 A/B。
+
+核验 `/home/yhc23/.local/bin/nsys` 为 2026.4.1，单独采集 bench 并验证 GPU 数据完整：232 次 branch_work、1 次 H2D、44 次 D2H、2 次 memset。逐条 CSV 结构化解析确认数量，结合源码确定第 23～27 次为第一批正式 within_warp、第 28～32 次为第一批正式 between_warps；前 2 次初始校验、随后 20 次预热。CPU/GPU 时间线能观察整个运行过程，汇总合并两模式不用于单模式比较。GUI 人工打开本次 NOT RUN，未声称完成用户操作验收。
+
+证据前缀 `reports/CH06/observe-preflight-2026-10-20`，保留 `.txt`、`.nsys-rep`、`.sqlite`、`.csv`。第一次 trace stats 因派生 SQLite 时间戳早于主报告而退出 1，诊断已转存日志，删除该次无效 CSV 后改读本次 SQLite，成功生成有效 CSV、退出 0，无需重新采集。工具采集运行与普通计时分开，未执行 NCU 或新的 Sanitizer。
+
+用户本次要求指令，预检由 Codex 完成，个人实验输出与解释待验收，Ch06 保持 RUNNING。实际学习及工程准备/agent 用时未记录。复用 Ch05 已学的 NSYS 流程，无新增依赖或必修知识，无需额外 Claude 审阅；未提交或推送，已有工作区改动保留。
+
+## 2026-10-20：Ch06 可选 NCU 动态分歧观察
+
+用户主动询问如何用 NSYS/NCU 观察 warp divergence。按最新明确指令增加可选观察：讲义提供 NCU Source Counters 和两项少量指标的采集/读取命令；PLAN 记录该可选观察，Ch07 正式教学及首轮验收边界保留。解释 NSYS 时间线能观察长短但不独立证明分歧，NCU 分歧目标计数和线程参与数结合源码才支持本例结论。此次未修改源码或增加依赖。
+
+核验 NCU 2025.2.1，依据本机 SourceCounters.section 和 metric 查询核对指标名。初次候选的 `smsp__branch_targets_threads_divergent` 在 launch metric 查询中无效，改用带 sass 的 `smsp__sass_branch_targets_threads_divergent.sum`；source 页面使用前一种名称。初次全量后缀查询输出过大，后续改为指定 base metric 和 sections 定向查询，未生成需清理的查询文件。
+
+按原 nvcc 命令重新编译，无警告，普通 check 两种模式全量正确。NCU 只过滤 branch_work 的两次 launch，运行 check，第一个结果 mode=0、第二个 mode=1，采集 SourceCounters、分歧目标总计数与每条指令平均参与线程数，import-source=yes；每次 launch 5 passes，采集后的应用仍两模式各 65536 项全量正确、退出 0。mode=0/mode=1 的分歧目标总计数为 2048/0，每条指令平均参与线程数为 16.40/32，Branch Efficiency 为 98.08%/100%。前者存在动态分歧证据；后者本次分歧计数为 0。高 Branch Efficiency 可能被大量一致的循环分支稀释，不换算为性能损失。
+
+报告 Details/Raw CSV 已导出并结构化核对结果 ID 0/1；CLI Source 导出进一步定位 kernel 偏移 0x270 的 BRA 分歧计数为 2048/0，后续 A/B 计算指令参与线程数为 16/32。该证据超出此前静态 SASS 检查，仍不等于逐周期硬件轨迹或固定减速比例。此处未做预热性能采样，不使用 NCU 插桩/重放下耗时作为普通计时；GUI 人工操作 NOT RUN。
+
+证据前缀 `reports/CH06/ncu-divergence-2026-10-20`，保留 `.ncu-rep`、`.txt`、`-details.txt`、`-raw.csv`、`-source.txt`。报告读取均退出 0；无临时无效产物。用户提出观察问题，工具查询、采集与解释由 Codex 完成，个人操作及解释待验收，Ch06 保持 RUNNING，不记 DONE。实际学习与工程准备/agent 用时均未记录，无需额外 Claude 审阅，未提交或推送，既有工作区改动保留。
+
+## 2026-10-20：用户 NCU GUI Source/SASS 关联观察
+
+用户提供打开 `ncu-divergence-2026-10-20.ncu-rep` 的 GUI 截图，已选择左侧 CUDA Source、右侧 SASS，并显示 Divergent Branches、Avg. Threads Executed 及 Avg. Predicated-On Threads Executed。截图中源码第 80 行分路处对应 SASS 偏移 0x270 的条件 BRA，第 81/83 行 A/B 调用各显示 16 个参与线程，第 85 行输出写入显示 32；与此前 CLI 导出一致，证明用户已实际打开报告并定位相关源码。用户询问这种源码/SASS 对照定位方法是否正确，属于实际观察与解释确认，未据此自动认定全章独立解释通过。
+
+截图中 Divergent Branches 的 100.0 为相对百分比显示，按官方文档可用 Source 工具栏 [%] 切换绝对值；结合原报告实际计数 2048，含义是当前该显示范围的分歧事件集中于此处，不是 100 次分歧、100% 性能损失或 Branch Efficiency=100%。源码行可关联多条 SASS，左侧行级聚合值不强行解释为单条指令值。历史“本次 GUI 未人工操作”仍描述 Codex 采集阶段；当前已新增用户截图证据，第二结果 GUI 对比尚未提供。
+
+本次仅据用户截图、既有报告和官方 Source 页面文档核对，不重新编译或采集；Ch06 保持 RUNNING，个人解释仍待补齐，实际学习与工程用时未记录。未改源码、未提交或推送。
+
+## 2026-10-20：Ch06 本章总结
+
+按用户“总结本章内容”的要求，在 NOTE 新增 Ch06 汇总，覆盖本章实际接触的 warp/lane、block 内与全局索引、两种分路方式、程序分工、constexpr 与六个实验参数、device 函数与两条计算体、CUDA 状态码和辅助检查、异步提交与同步边界、普通 Event 计时、NSYS 时间线、可选 NCU 动态分歧及 Source/SASS 对照。保留用户真实提问，补入 report 按执行结果组织、check 的 2 次与 bench 的 232 次启动、launch 筛选和 5 passes 的区别，不编造用户操作或独立理解证据。
+
+辅助程度明确为 Codex 提供框架并按请求补全两处练习、编译、memcheck、普通计时及 profiler 采集；用户完成了逐段阅读、提问和 NCU GUI 报告打开/源码关联查看，已有截图。总结引用本日已保存证据：普通观察 bench 的两模式中位数 116.083205/71.097600 μs；NCU 两结果分歧目标计数 2048/0、平均每指令参与线程 16.40/32、Branch Efficiency 98.08%/100%。注明这些计时与 NCU 指标来自不同运行，分别保留计时边界与动态证据范围，不混用 profiler 耗时或相对百分比。
+
+Ch06 保持 RUNNING，个人解释验收待补齐；用户提问和 GUI 观察不自动替代对 warp 分组、分歧原因及 Event 边界的独立复述。NOTE 给出必做复述及可选工具复习，不将主动扩展的 NCU 观察升级为必修。计划学习 45～60 分钟，实际学习与工程准备/agent 执行耗时仍未记录，不从跨日会话推算。
+
+本次仅整理 NOTE 与 RECORD，核对源码、既有日志/报告、文档链接和 diff 格式，没有重新编译、运行 GPU、采集 profiler 或测量性能。无新增计划范围变更，无需额外 Claude 审阅，未启动 Claude、未提交或推送，已有代码、讲义与证据保留。

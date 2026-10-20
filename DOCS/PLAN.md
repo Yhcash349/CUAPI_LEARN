@@ -73,6 +73,8 @@ Ch12 的手写 GEMM 只做单层 tiling；cuBLAS、完整 Roofline 和低精度�
 
 Ch04 只学习同一 stream 内 Event 计时，跨 stream 依赖到 Ch15 再讲。Ch05 正式引入 NSYS，Ch07 正式引入 NCU；此前的工具执行可由 Codex 做环境预检，不能要求用户提前解释指标。Ch13 之前只给运行和计时所需的最小异步说明。
 
+2026-10-20 用户主动询问如何用 NSYS/NCU 观察 warp divergence，按最新指令在 Ch06 增加可选的两次 launch 分支观察；只读 Source Counters、分歧目标计数及平均每指令参与线程数，不调整 Ch07 正式教学安排，不作为首轮新增验收门槛。
+
 Ch15 先使用相互独立的数据块和双缓冲骨架；不能把同一步有数据依赖的 H2D→计算→D2H 强行重叠。Ch16 使用已预热、预分配、固定地址的小 kernel 链，先检查 capture 合法性，不要求掌握所有 capture mode 或跨 stream capture。Ch18 采用 primary context、module/function 和 `cuLaunchKernel` 骨架，复用 Ch17 cubin；显式 context、Driver entry point 等留给选修。
 
 ## 6. 后续选修：保留原工作主线
@@ -146,7 +148,8 @@ CH03/                                       # 按用户明确请求准备错误�
 CH02/                                       # 索引与越界保护已按要求补全并验证，解释待验收
 CH04/                                       # 正确计时已按要求补全并验证，个人解释待验收
 CH05/                                       # 独立 vector_add.cu，NSYS 采集练习
-CH06/ ... CH19/                              # 按需创建
+CH06/                                       # warp/lane 与分路条件已按要求补全，个人解释待验收
+CH07/ ... CH19/                              # 按需创建
 common/                                      # 逐步提取的检查、计时 helper
 scripts/                                     # 按需新增 env/profile/export 脚本
 DOCS/chapters/XX_topic.md                     # 一章一份简短任务和实验记录
@@ -191,3 +194,5 @@ Reference 查参数、错误与同步语义，Programming Guide 查执行机制�
 | 2026-09-22 | 准备 Ch04 预热、CPU timer 与同 stream Event 计时骨架和讲义 | 用户明确要求“生成CH04内容”；保留 Ch03 修复复测及个人解释待验收，固定小输入比较计时范围，不扩展多 stream 或 profiler 教学 |
 | 2026-09-28 | 准备 Ch05 NSYS 采集与三类轨迹练习，复用 CH02 单次 vector add | 用户明确要求“生成CH05内容”；直接采集现有程序，不复制 kernel；提供 GUI 与 CLI 阅读路线，保留前章待验收项，不扩展性能调优主题 |
 | 2026-09-28 | Ch05 补齐独立目录与源码；后续每章均保留自己的源码入口 | 用户明确要求即使复用也单独生成章节文件夹，方便按章查看；原直接引用 CH02 的目录安排由此替代 |
+| 2026-10-08 | 准备 Ch06 独立 warp/lane 与两种分支分组练习，完成临时补全版正确性、计时与编译产物预检 | 用户明确要求“生成CH06内容”；保留两处关键 TODO 和前章待验收项，SASS 仅由教学方预检，不提前引入 NCU 或扩展课程范围 |
+| 2026-10-20 | 在 Ch06 增加可选 NCU 动态分支观察，保留 Ch07 正式引入 NCU 的安排 | 用户明确询问如何用 NSYS/NCU 观察 warp divergence；仅采集已有程序两次 launch，不新增课程必修或重构代码 |

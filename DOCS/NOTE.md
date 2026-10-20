@@ -318,3 +318,136 @@ nvcc -std=c++17 -O2 -arch=sm_75 -lineinfo \
 ### 八股自测
 
 拿自己的 `_02` 报告说明：CPU 的 vector_add 启动事件与 GPU 的 vector_add 执行事件如何区分、怎样对应源码？两个相同大小的输入拷贝为什么不能只比较 CPU 红色条就判断 GPU 搬运速度，哪个时间区间说明 CPU 与 GPU 可以重叠工作？待用户用自己的话解释。
+
+## 2026-10-20 Ch06：warp 分组、分支分歧与实验观察
+
+### 今日完成任务
+
+本条为本章汇总，覆盖 10 月 8 日内容准备、10 月 14 日编号练习及后续代码讲解、10 月 20 日分路补全与观察，不把跨日会话间隔当成学习用时。源码为 [CH06/warp_branch.cu](../CH06/warp_branch.cu)，完整操作与历史验证见 [章节讲义](chapters/06_warp_execution.md)，进度、辅助程度及验收只在 [RECORD](RECORD.md) 维护。
+
+框架、TODO 1 的 lane/warp 计算、TODO 2 的分路条件均由 Codex 按用户要求实现并验证。用户逐段阅读和提问，并实际用 NCU GUI 打开 `ncu-divergence-2026-10-20.ncu-rep`，提供左侧 CUDA Source、右侧 SASS 及分歧/线程参与指标的截图。源码与指令的对应已有用户操作证据；没有将 Codex 编译、采集或用户提问写成用户独立实现与完整解释验收。
+
+### 基本概念
+
+<span style="color:red">用户提问：Ch06 主要讲什么，程序的组织结构怎样，为什么比前章多了很多函数？</span>
+
+<mark>本章主要观察：相同的 A/B 总工作量，放在同一 warp 内分路，或让不同 warp 分别走完整路径，执行情况可能不同。</mark> warp 是 GPU 调度的一组 32 个线程，lane 是线程在组内的位置。这里使用一维 block，连续的 32 个 block 内线程编号组成一个 warp；不能据此认为所有 GPU 线程在每个时刻严格同步。
+
+```cpp
+const int t = threadIdx.x;
+const int lane = t % warpSize;
+const int warp_in_block = t / warpSize;
+```
+
+线程 31 是 warp 0、lane 31；线程 32 是 warp 1、lane 0；线程 63 是 warp 1、lane 31。`warp_in_block` 在每个 block 中重新从 0 编号，不是 SM 编号。数组访问则用全局下标 `i = blockIdx.x * blockDim.x + threadIdx.x`，不要将 lane、block 内编号和全局下标混为一谈。
+
+程序分工围绕实验流程展开：
+
+```text
+CPU main：选择模式、查询设备、返回成功或失败
+  ├─ probe → run_probe → GPU probe_warps → 回读并校验 64 项编号
+  ├─ check → run_branch(false) → 两种分路模式各运行一次并校验
+  └─ bench → run_branch(true) → 校验、预热、重复计时、输出中位数
+
+GPU branch_work：读 input[i] → choose_path_a → path_a 或 path_b → 写 output[i]
+```
+
+`make_reference` 在 CPU 生成两套正确答案，`mismatches` 统计错误元素，`median` 取计时中位数。`run_branch` 内的 `launch`、`validate` 是 lambda，即当前函数内部起名的小函数，`[&]` 允许其引用外层变量；前者由 CPU 提交 kernel，后者回读并校验。函数变多是为了分开编号观察、两路计算、校验和计时，核心修改仍是编号和分路两处。
+
+`run_probe` 先在 GPU 分配两个数组，64 个 GPU 线程各写自己的 lane/warp 编号，再回读到 CPU 的两个 vector。GPU 只打印 8 项边界值，CPU 检查全部 64 项；printf 的输出先后不证明线程执行顺序。`errors += 条件1 || 条件2` 中，只要任一编号错误就给该线程计 1 项，两个字段都错也只加 1。
+
+<span style="color:red">用户提问：这些参数是做什么的，constexpr 是什么意思？</span>
+
+| 参数 | 本章作用 |
+| --- | --- |
+| `kBlock=256` | 计时 kernel 每个 block 256 个线程，含 8 个完整 warp |
+| `kN=65536` | 每线程处理一项，共 256 个 block |
+| `kIterations=256` | 每个线程在所选路径中循环计算 256 次 |
+| `kWarmup=10` | 每种模式正式计时前先运行 10 次 |
+| `kSamples=21` | 每种模式获取 21 个样本并取中位数 |
+| `kBatch=5` | 每个 Event 样本连续启动 5 次 kernel，再将整批时间除以 5 |
+
+<mark>Iterations 是一次 kernel 内的循环次数，Batch 是一次计时内 kernel 的启动次数。</mark> `probe` 的一个 block、64 个线程独立配置，不使用计时 kernel 的 `kBlock`。`constexpr` 变量要求初始化值在编译时能确定，且初始化后不可修改；`const` 只要求初始化后不可修改，初值可以运行时才得到。变量名前的 `k` 只是常量命名习惯。
+
+<span style="color:red">用户提问：__device__ 是什么意思，path_a 与 path_b 有什么区别？</span>
+
+`__device__` 表示函数在 GPU 上执行，供 GPU 代码调用；本程序由 CPU 用 `<<<...>>>` 启动 `__global__` kernel，当前 GPU 线程再调用选中的 device 函数。调用 `path_a` 不会创建新线程，也不是重新提交一次 kernel。
+
+两条路径都接收 `x`、循环 `iterations` 次、返回最终值，区别是乘加常数及右移位数不同：A 右移 13 位，B 右移 11 位。`x ^= x >> 13` 等价于 `x = x ^ (x >> 13)`，用移位和按位异或混合数值中的位。`uint32_t` 的运算按模 2^32 处理，CPU/GPU 可以精确比较结果；无需把这些常数扩展成算法学习任务。
+
+`__noinline__` 是尽量保留独立函数调用的编译提示，不单独保证真实分支存在。两条有数据依赖的计算体用于形成不同且可校验的工作，实际控制流还需由编译产物及动态指标核对。
+
+两种模式都包含 A、B，总人数各 32768，输入和输出地址始终按全局下标连续访问：
+
+| 模式 | 选 A 的条件 | warp 内的安排 |
+| --- | --- | --- |
+| `within_warp`，mode=0 | `lane < 16` | 每个 warp 的前半组走 A、后半组走 B |
+| `between_warps`，mode=1 | `warp_in_block % 2 == 0` | 偶数 warp 全走 A、奇数 warp 全走 B |
+
+<mark>分支分歧发生在同一 warp 的线程选择不同执行路径时；不同 warp 各自选择不同路径不构成这个意义上的 warp 内分歧。</mark> 不属于当前路径的线程暂不参与相关指令。两种模式的同一下标可能走不同路径，输出无需相互相等，应各自与对应的 CPU reference 比较。编译器可能改写简单分支，本机一次结果也不能推广成所有分支固定慢几倍。
+
+<span style="color:red">用户提问：CUDA 自己没有错误码吗，为什么需要 check_cuda，必须显式写这个函数吗？</span>
+
+CUDA API 本身返回 `cudaError_t`，成功为 `cudaSuccess`。`check_cuda` 是项目自己的辅助函数，将判断状态、输出 API 名称/源码位置/错误说明、退出程序统一起来，并非 CUDA 必须提供的函数。可以逐次写 `if (status != cudaSuccess)` 自行处理；返回错误码不会自动替应用完成所有错误处理。当前程序选择失败时退出，不把这一处理策略当成 API 要求。
+
+<span style="color:red">用户追问：GPU 异步执行，和 cudaGetLastError 是否等待 GPU 完成有什么关系？</span>
+
+CPU 提交 kernel 后能够继续运行，此时 GPU 可能尚未执行到会出错的位置。`cudaGetLastError()` 读取并清除当前 host 线程的 Runtime 错误记录，不等待 GPU；它也可能读到此前异步工作留下的错误，检查点不是故障发生点的保证。
+
+```cpp
+branch_work<<<grid, block>>>(...);      // CPU 提交 GPU 工作
+CUDA_CHECK(cudaGetLastError());        // 读取此刻已有的错误记录
+CUDA_CHECK(cudaDeviceSynchronize());   // 等待此前设备工作完成，并检查返回状态
+```
+
+<mark>启动后的检查没有读到错误，不代表 GPU 后续执行一定成功；等待完成后再检查，才能覆盖执行结束这一时间边界。</mark> 需要精确检查越界等内存访问仍使用 Sanitizer，不能把数值 PASS 当作内存安全证明。
+
+<span style="color:red">用户提问：给出观察两条 path 整个流程耗时差异的指令。</span>
+
+这里的对照单位是两种线程分路安排，当前没有分别启动一个“全 A kernel”和一个“全 B kernel”。普通 `check` 先检查正确性，`bench` 通过后再预热并采集 Event 样本；起止 Event 与 kernel 在同一 stream，等待 stop 完成再读时间。两种模式成对采样并轮换先后，每批回读校验在计时区间外。
+
+`event_batch_per_launch_median_us` 是 Event 毫秒差乘 1000、除以 5，再对每模式 21 个样本取中位数。它不含分配、H2D、D2H、CPU reference/校验和初始化，仍可能包含 CPU 提交间隙；不能冒充含传输的端到端时间或 profiler 上某一次 kernel 的 duration。
+
+本章 10 月 20 日普通观察运行得到 within_warp=116.083205 μs、between_warps=71.097600 μs，参数为 GTX 1650、N=65536、uint32、grid/block=256、iterations=256、warmup=10、samples=21、batch=5。数值引自 [普通运行及 NSYS 预检日志](../reports/CH06/observe-preflight-2026-10-20.txt) 中工具外的 bench；本次总结未重测。它支持本机本次“warp 内分路较慢”的观察，不把总差值全部解释为纯分歧开销。
+
+<span style="color:red">用户提问：如何用 NSYS 或 Nsight Compute 观察是否存在 warp divergence？</span>
+
+NSYS 记录 CPU 提交、GPU kernel 与内存活动的时间关系。两种模式都显示为 `branch_work`，内部 device 函数 A/B 不会各自变成 kernel 时间条；时间较长本身不独立证明分歧。用户主动提出的 NCU 观察为本章可选扩展，正式 NCU 课程仍按 Ch07 推进。
+
+NCU 在本机采集 `SourceCounters`、分歧分支目标总计数与每条指令平均参与线程数，得到以下动态证据：
+
+| 指标 | within_warp | between_warps |
+| --- | --- | --- |
+| 分歧分支目标计数（sum） | 2048 | 0 |
+| 每条指令平均参与线程数 | 16.40 | 32 |
+| Branch Efficiency | 98.08% | 100% |
+
+来源为 [NCU 报告](../reports/CH06/ncu-divergence-2026-10-20.ncu-rep) 与 [Details 文本](../reports/CH06/ncu-divergence-2026-10-20-details.txt)，本次只核对已有证据。第一种模式的非零分歧目标计数，结合条件分路和半组线程参与，支持实际发生分歧。Branch Efficiency 汇总大量一致的循环等分支，98.08% 不代表仅损失 1.92% 性能。低参与线程数也可能来自尾部线程或提前退出，不能单独作为分歧证明。
+
+<span style="color:red">用户提问：在 NCU Source 选择 Divergent Branches 和 Avg. Threads Executed，就能定位源码，并与旁边 SASS 对照吗？</span>
+
+可以。用户截图中，第 80 行 if 对应右侧偏移 0x270 的条件 BRA；第 81、83 行 A/B 调用各有 16 个参与线程，第 85 行写出恢复为 32。SASS 是 GPU 机器指令的汇编表示，Source 页面借助编译时的 `-lineinfo` 将指标与 CUDA/SASS 位置关联；`--import-source yes` 把相关源码保存在报告中，便于跨机器查看。
+
+<mark>一行 CUDA 可能关联多条 SASS，源码行的聚合值不等于每条指令的值。</mark> 用户截图里 Divergent Branches 的 100.0 是相对显示，表示相应范围内的分歧计数集中在这一处；可用工具栏 `%` 切换绝对值，该处原始计数为 2048。它不是 100 次分歧，也不是 100% 时间损失或 Branch Efficiency=100%。
+
+<span style="color:red">用户提问：NCU report 怎样组织，为什么只有两次 branch_work，实验不是重复了很多次吗，能只采集某几次吗？</span>
+
+在本次默认 kernel 采集方式下，一份 report 包含多个执行结果，每个结果对应一次选中的 kernel 启动，并包含该次配置、Details 指标、Source/SASS 关联等；顶部 Result 切换结果，不是切换源码中的两个不同函数。实际采集末尾参数为 `check`，只主动提交 mode=0/1 两次启动；`bench` 才会提交 2 次初始校验＋20 次预热＋21×2×5 次正式启动，共 232 次。
+
+`--kernel-name branch_work` 筛选名称，`--launch-count 2` 限制采集数量，`--launch-skip` 跳过指定数量的匹配启动。它按启动次数计数，不自动识别模式；例如对当前 bench 跳过 22 次后采集 1 次对应第 23 次 within_warp，跳过 27 次后采集 1 次对应第 28 次 between_warps。改参数后需要重新核对顺序。
+
+日志的 `5 passes` 是 NCU 为收集不同指标对同一次启动进行的多轮采集，最终合成一个结果，不会因此在 GUI 生成 5 个 Result。<mark>程序循环次数、筛选出的启动次数、工具内部 replay passes 是三个不同层次。</mark> 本次 NCU 采集 check 用于观察动态计数，不是预热性能采样，工具下耗时与普通 bench 分开解释。
+
+相关语义见 [CUDA 12.9 错误处理](https://docs.nvidia.com/cuda/archive/12.9.0/cuda-runtime-api/group__CUDART__ERROR.html)、[NCU Source 页面](https://docs.nvidia.com/nsight-compute/NsightCompute/index.html#source-page)、[NCU CLI](https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html) 与 [Replay](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#replay)。完整命令集中在章节讲义，不在笔记重复维护多套实验入口。
+
+### 踩坑记录
+
+本章真实追问集中在三个理解边界：CUDA 已返回状态码，为何还需自定义检查；GPU 异步执行，为何错误查询成功不保证后续成功；bench 明明重复很多次，为何 NCU 报告只有两个结果。相应原因与调用顺序已在上文保留，不将这些问题写成用户发生了编译或运行故障。
+
+用户实际提供了 NCU Source/SASS 关联截图；显示中的 100.0 需要区分相对值与绝对计数，行级聚合也需区分单条指令。第二结果的 GUI 对比尚未收到截图，两个模式的动态数值来自 Codex 已采集报告；不把建议用户进行的操作写成已经完成。代码、常量设置和工具细节已讲解，仍不据此推定独立掌握。
+
+### 八股自测
+
+必做复述：线程 32 的 warp/lane 是什么？两种模式 A/B 总人数相同，为什么 mode=0 会发生 warp 内分歧，而 mode=1 不会？结合条件代码和普通计时结果，说明本次测量包含哪些工作、没有覆盖哪些端到端环节。
+
+可选复述：拿 NCU Source/SASS 说明分歧定位、16/32 个参与线程与相对 100.0 的含义，再解释 report 的两次结果和 5 passes 为什么不矛盾。该项用于复习主动询问过的工具观察，不新增课程必修门槛。
