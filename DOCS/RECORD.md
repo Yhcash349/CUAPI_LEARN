@@ -17,7 +17,7 @@
 | 04 正确计时 | RUNNING | 45～60min | — | 未评估 | 保留已有预热设置，Codex 补全 Event 与验证 | 正式程序 1000 项通过、最大误差 0、计时 PASS；个人解释待验收 |
 | 05 NSYS | RUNNING | 45～60min | — | 未评估 | Codex 源码、讲义、排障与读图讲解 | 用户 _02 采集与 GUI 读图已有报告/截图；三类活动已验证，个人解释待验收 |
 | 06 warp 执行 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、讲解与两处练习补全 | 正式校验、memcheck、计时及 NCU 动态分歧检查通过；用户已有 Source/SASS 关联截图，个人解释验收待补齐 |
-| 07 合并访存与 NCU | TODO | 45～60min | — | 未评估 | 未开始 | — |
+| 07 合并访存与 NCU | RUNNING | 45～60min | — | 未评估 | Codex 骨架、讲解、预检与按要求补全索引 | 正式校验、memcheck 与 Event 通过，历史临时版 NCU 对照通过；用户已复述地址排列对照，个人运行/采集及计数与计时边界解释待验收 |
 | 08 shared 与同步 | TODO | 45～60min | — | 未评估 | 未开始 | — |
 | 09 bank conflict | TODO | 45～60min | — | 未评估 | 未开始 | — |
 | 10 归约 | TODO | 45～60min | — | 未评估 | 未开始 | — |
@@ -305,3 +305,35 @@ Ch06 改为 RUNNING，辅助程度为 Codex 提供框架、讲解和按要求补
 Ch06 保持 RUNNING，个人解释验收待补齐；用户提问和 GUI 观察不自动替代对 warp 分组、分歧原因及 Event 边界的独立复述。NOTE 给出必做复述及可选工具复习，不将主动扩展的 NCU 观察升级为必修。计划学习 45～60 分钟，实际学习与工程准备/agent 执行耗时仍未记录，不从跨日会话推算。
 
 本次仅整理 NOTE 与 RECORD，核对源码、既有日志/报告、文档链接和 diff 格式，没有重新编译、运行 GPU、采集 profiler 或测量性能。无新增计划范围变更，无需额外 Claude 审阅，未启动 Claude、未提交或推送，已有代码、讲义与证据保留。
+
+## 2026-10-20：Ch07 合并访存与 NCU 内容生成及预检
+
+用户明确要求“生成CH07内容”。按 PLAN 阶段 B 新增 [CH07/memory_access.cu](../CH07/memory_access.cu) 和 [章节讲义](chapters/07_coalescing_ncu.md)，同步 PLAN 目录及准备依据。复用前章检查、全量校验与成对 Event 计时骨架，正式代码只留一处 `input_index()` 跨步读取索引 TODO。连续/跨步模式在相同输入数组的每个 32×32 小片内按行/按列读取，均应读取全部元素各一次、做相同次数加法并连续写出；不使用直接 i*stride 的越界/扩大 footprint 对照，不引入 shared memory、bank conflict 或新依赖。NOTE 不提前记录未实际学习的内容。
+
+现场复核 NVCC 12.9.86、GTX 1650 / CC 7.5 / warpSize=32 / 4096 MiB、驱动 610.88、NCU 2025.2.1.0、Compute Sanitizer 2025.2.1.0；程序查询 L2=1048576 字节。正式骨架与临时补全版均按讲义选项编译，无警告。shape=[4194304]、float32、grid=16384、block=256，GPU 两数组各 16 MiB。正式 check/bench 的 contiguous 全量 PASS，strided 为预期 FAIL（4063232 项不符、最大绝对误差 240.25），跳过计时并退出 1。临时补全版 check/bench 两模式各 4194304 项全量正确、误差 0，单独 memcheck 零错误，均退出 0。
+
+正常计时与工具采集分开：每模式 warmup=10、samples=21、batch=5，Event 批次平均每次启动中位数 contiguous=317.452788 μs、strided=684.985590 μs。教学方 SASS 核查保留 LDG、FADD、STG，未消除读取。另一次 NCU check 运行只采 access_pattern 的两次 launch、每次 3 passes；两种模式应用仍全量 PASS。结果 ID 0/1 的 global load requests 均为 131072，global load sectors 为 524288/4194304，平均每请求涉及 sector 为 4/32。Details 和 Raw CSV 均成功导出并核对；CSV 为宽表，已排除单位行。计数只描述 L1/TEX global load 请求，不推断 DRAM 字节数或固定 8 倍减速；本机本次跨步较慢，无普适加速承诺。
+
+证据为 `reports/CH07/preflight-2026-10-20.txt`、`completed-2026-10-20-sm75.sass.txt` 及 `ncu-preflight-2026-10-20` 前缀的 `.ncu-rep`、`-details.txt`、`-raw.csv`。预检报告导入临时补全源码以便复盘；临时源码及二进制在核对后清理，正式 build 保留练习占位版本。NCU 指标名与命令按本机工具核验，语义核对 NVIDIA 官方 CUDA 12.9/NCU 文档；本次 NCU GUI 人工操作和 NSYS 为 NOT RUN。检查章节链接及 diff 格式，无无效尝试文件遗留。
+
+Ch07 为 READING，用户本次仅提出生成请求，关键索引实现、实际采集与个人解释待验收；Codex 提供骨架、讲义和临时完成版预检，不记为用户掌握。前章解释与其他遗留项保持。计划学习 45～60 分钟，实际学习及工程准备/agent 执行耗时均未记录。无教学范围偏离，无需额外 Claude 审阅，未启动 Claude、未提交或推送 Git。下一步用户先预测、编译观察占位失败，再补 TODO、重编译 check/bench、独立采两次 NCU 并解释计数和计时边界。
+
+## 2026-10-21：Ch07 跨步读取索引补全与正式验证
+
+用户指定 `CH07/memory_access.cu` 的 `input_index()` 并要求“完成todo”。Codex 计算 32×32 小片起点 base 和片内 row/col，返回 `base + col * kSide + row`，移除占位 TODO，添加保留小片起点的中文说明；正确性失败时不再提示补全已完成的 TODO。沿用输入、独立 CPU reference、kernel 计算与计时配置，同步讲义当前状态和 PLAN 目录注释，无计划范围偏离。
+
+现场复核 NVCC 12.9.86、Compute Sanitizer 2025.2.1.0、GTX 1650 / CC 7.5 / warpSize=32 / 4096 MiB、驱动 610.88；shape=[4194304]、float32、grid=16384、block=256，输入和输出各 16 MiB。正式源码按讲义命令编译无警告，check/bench 两种访问各 4194304 项全量 PASS、mismatches=0、最大绝对误差 0；独立 memcheck 零错误，均退出 0。
+
+正常计时与 Sanitizer 分开，每模式 warmup=10、samples=21、batch=5，Event 批次平均每次启动中位数 contiguous=317.593598 μs、strided=689.043188 μs，Timing PASS。不包含分配、传输或校验，仍可包含 host 提交间隙；仅为当前 GPU/输入的观察，不与历史运行作配对优化结论。本次 NCU、NSYS、SASS 导出和 GUI 均 NOT RUN，历史临时版 NCU 计数未冒充本次正式采集。命令、输出与源码 SHA-256 见 `reports/CH07/completed-2026-10-21.txt`，正式 build 已更新，无临时尝试文件。
+
+Ch07 更新为 RUNNING；实现和验证均由 Codex 按要求完成，用户本次指定补全，个人运行、NCU 采集及解释待验收，不记 DONE。实际学习及工程准备/agent 执行耗时未记录。检查文档链接和 diff 格式，既有工作区改动保留；无需额外 Claude 审阅，未启动 Claude、未提交或推送 Git。
+
+## 2026-10-21：Ch07 今日与本章总结
+
+用户要求“总结今日。本章内容”。在 NOTE 新增本日 Ch07 条目，整理连续/跨步地址分组、base/row/col 索引、host run 流程、lambda 与字符串指针数组、forceinline/noinline、Event 采样和中位数、NCU requests/sectors、L1/TEX/L2/DRAM 层次与证据边界。保留用户真实提问与主动复述：能说明把 1024 项看成 32×32 表格，通过行列交换改变相邻线程的读取位置。该复述作为局部理解证据，不继续笼统写成没有任何解释，也不据此完成整章验收。
+
+实现和编译、memcheck、bench 由 Codex 按要求完成，用户已逐段阅读、提问并复述实验主要变量；尚未收到本章用户自己的运行输出、NCU 报告或 GUI 截图。总结重读正式完成版日志及历史 NCU Details：10 月 21 日普通 Event 中位数连续=317.593598 μs、跨步=689.043188 μs，约 2.17 倍；10 月 20 日临时版 NCU 两结果 requests 均为 131072，sectors 为 524288/4194304，平均每请求 4/32 sector。NOTE 明确这两组证据来自不同日期和运行，不混用 profiler 耗时、DRAM 流量或缓存命中率；未采集的指标不填造。本次未增加 GPU 性能结论。
+
+Ch07 保持 RUNNING，不标 DONE；剩余为用户自己的正确性/计时与两次 NCU 结果对应、sector 与显存流量及时间边界的个人解释。掌握度仍未整体评估，计划学习 45～60 分钟，实际学习和工程准备/agent 执行耗时未记录。NOTE 不另维护进度或工时。
+
+本次只更新 NOTE 与 RECORD，核对现有源码、日志、数据计算、文档链接和 diff 格式；没有重新编译、运行 GPU、计时或采集 NCU/NSYS/Sanitizer。既有源码与报告保留，无临时文件或新增计划范围，无需额外 Claude 审阅，未启动 Claude、未提交或推送，先前工作区改动保留。

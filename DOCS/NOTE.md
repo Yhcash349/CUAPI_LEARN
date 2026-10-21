@@ -451,3 +451,112 @@ NCU 在本机采集 `SourceCounters`、分歧分支目标总计数与每条指�
 必做复述：线程 32 的 warp/lane 是什么？两种模式 A/B 总人数相同，为什么 mode=0 会发生 warp 内分歧，而 mode=1 不会？结合条件代码和普通计时结果，说明本次测量包含哪些工作、没有覆盖哪些端到端环节。
 
 可选复述：拿 NCU Source/SASS 说明分歧定位、16/32 个参与线程与相对 100.0 的含义，再解释 report 的两次结果和 5 passes 为什么不矛盾。该项用于复习主动询问过的工具观察，不新增课程必修门槛。
+
+## 2026-10-21 Ch07：合并访存、读取索引与 NCU sector
+
+### 今日完成任务
+
+围绕 [CH07/memory_access.cu](../CH07/memory_access.cu) 阅读连续/跨步读取索引、host 实验流程、校验与 Event 计时，学习用 NCU 对应读取请求数和 sector 数。原骨架及预检于 10 月 20 日准备，今天用户要求补全唯一 TODO，Codex 完成正式实现、编译、全量校验、memcheck 和普通 bench；用户随后逐段阅读、提问并用自己的话复述了两种地址安排。完整命令与验证见 [章节讲义](chapters/07_coalescing_ncu.md)，工程进度和工作量只在 [RECORD](RECORD.md) 维护。
+
+用户的复述已抓住主要变量：把 1024 项想象成 32×32 表格，通过交换行列让相邻线程读取不相邻的位置，比较访问效率与耗时。补充澄清“按顺序”指地址下标相邻，不表示线程一个接一个执行；1024 项只是一个小片，完整输入含 4194304 项。尚未收到用户自己的 check/bench 输出或本章 NCU 报告/截图；实现与工具验证不写成用户独立完成。
+
+### 基本概念
+
+**从线程编号到读取地址**
+
+<span style="color:red">用户提问：本章主要讲什么，怎样阅读这个 CU 文件，input_index() 中这一段是什么意思？</span>
+
+<mark>本章保持每线程一次读取、一次加法和一次连续写出，只改变同一 warp 中线程的读取地址排列。</mark> GPU kernel 的核心是：
+
+```cpp
+const int j = input_index(i, mode);
+output[i] = input[j] + 1.0f;
+```
+
+`i` 是全局输出下标，决定写在哪里；`j` 是输入下标，决定从哪里读。连续模式返回 i；跨步模式把每个小片内的 `(row, col)` 映射到 `(col, row)`：
+
+```cpp
+const int base = (i / kTileElements) * kTileElements;
+const int row = (i - base) / kSide;
+const int col = (i - base) % kSide;
+return base + col * kSide + row;
+```
+
+`kSide=32`、`kTileElements=1024`。base 是当前小片起点；对片内偏移整除 32 得行号，取余得列号。返回时保留 base，保证不同小片各自处理自己的数据。比如 i=35 对应 `(1,3)`，跨步读 j=97，即 `(3,1)`，结果仍写 output[35]。两种模式都恰好读取全部输入各一次，输出顺序可不同，应分别和各自的 CPU reference 比较。
+
+```text
+同一个 warp 的 lane：   0   1   2   3  ……  31
+连续读取 input 下标：    0   1   2   3  ……  31
+跨步读取 input 下标：    0  32  64  96  …… 992
+两者写入 output 下标：  0   1   2   3  ……  31
+```
+
+这张 32×32 表格只是理解一维数组下标的方法，没有分配 shared memory。直接 `i*32` 会超出当前数组，简单取模又可能重复读部分元素，均不是本章要求的片内行列交换。
+
+**run() 的组织与遇到的 C++ 语法**
+
+<span style="color:red">用户提问：讲解 run()；read_and_check 和 const char* names[] 分别是什么语法，为什么读不懂？</span>
+
+`run(bool timing)` 在 CPU 上组织“准备输入和两套 reference → GPU 分配/H2D → 两种模式分别计算和校验 → 按需预热与计时 → 释放内存”。timing 控制是否计时，mode=0/1 控制读取方式。`correct &= pass` 保留任一模式失败的结果；两个模式的校验分别执行，不因前者失败就跳过后者。
+
+`const char* names[] = {"contiguous", "strided"};` 是含两个元素的字符指针数组，指向只读字符串；names[mode] 取得对应模式的名称。const 修饰所指字符，不表示指针数组本身不可修改。
+
+`auto read_and_check = [&](int mode, bool verbose) { ... };` 是 lambda 表达式，可以先理解为在 run() 内起名的局部小函数。auto 让编译器推断变量类型，`[&]` 允许通过引用使用外层局部变量，括号中是调用参数，花括号中是执行内容。它在 CPU 上回读 GPU 输出，再调用 validate，返回 bool；调用形式是 `read_and_check(1, true)`。verbose 控制是否打印正常校验结果，出错时即使 false 也会打印。另一个 lambda launch 负责向 GPU 提交 kernel，它自身仍在 CPU 上执行。
+
+**内联标记的用途**
+
+<span style="color:red">用户提问：__forceinline__ 是什么意思，什么时候用 forceinline，什么时候用 noinline，有什么讲究？</span>
+
+内联是编译器把被调用函数的计算展开到调用位置，省去独立调用和返回，并可能进一步优化。`__device__` 表示函数在 GPU 上执行，`__forceinline__` 要求编译器内联；本章短小的 input_index 使用该标记。普通代码可以先交给编译器自行决定，不因看到短函数就要求手工标记。
+
+`__noinline__` 是尽可能保留独立函数调用的提示，可用于控制重复展开或构造实验；Ch06 的 path_a/path_b 用它帮助保留两条计算路径。它不禁止函数内部其他优化，也不单独保证最终分支形态。强制内联大函数可能使代码膨胀，不能承诺更快；两标记不能同时用于同一函数。语义见 [CUDA 12.9 内联说明](https://docs.nvidia.com/cuda/archive/12.9.0/cuda-c-programming-guide/index.html#noinline-and-forceinline)。
+
+**普通 bench 测量了什么**
+
+<span style="color:red">用户提问：最后 bench 跑出来的数据差异是什么？</span>
+
+先全量校验，再每模式预热 10 次；取 21 轮样本，每轮两模式交替先后，每个 Event 区间连续启动同模式 kernel 5 次。等待 stop 完成后读毫秒差，乘 1000 转为微秒、除以 5 得批次平均每次启动时间，最后对每模式 21 个值取中位数。每批回读校验在 Event 区间外。
+
+正式完成版的 GTX 1650、float32、N=4194304、grid=16384、block=256 运行结果如下，原始证据为 [completed-2026-10-21.txt](../reports/CH07/completed-2026-10-21.txt)：
+
+| 读取方式 | Event 批次平均每次启动的中位数 |
+| --- | --- |
+| contiguous 连续 | 317.593598 μs |
+| strided 跨步 | 689.043188 μs |
+
+跨步耗时约为连续的 2.17 倍，多约 371.45 μs。两模式各 4194304 项全量正确、误差 0，独立 memcheck 零错误。<mark>时间不含分配、H2D/D2H、CPU reference 或校验，仍可能包含 host 提交间隙；这是本机本次对照，不是固定减速比例。</mark> 本条总结重读已有日志，没有重新计时。
+
+**NCU 的 sector 与缓存层次**
+
+<span style="color:red">用户提问：如何用 NCU 查看读取请求涉及多少个 32 字节数据块，什么是数据块？L1/TEX 层面的访问是什么意思，为什么 sector 多 8 倍不代表显存传输或耗时多 8 倍？</span>
+
+sector 是这里按 32 字节边界划分的访存单位，容纳 8 个 float；它与 kernel 的线程组 block 不同。本章对齐的第一个 warp 连续读 0～31 项，集中在 4 个 sector；跨步读 0、32……992 项，涉及 32 个不同 sector。合并访存关注的是同一 warp 一次读取所需数据的分布，不只是整个 kernel 最后有没有遍历完整数组。
+
+NCU 对本例只选 access_pattern 的两次 check 启动，第一个结果为连续、第二个为跨步。采集 `l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum`（读取请求总数）和 `l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum`（请求涉及的 sector 总数），用后者除以前者得到平均每次请求涉及的 sector 数。对当前 kernel，一个完整 warp 执行一次 global load 产生一次请求，不是每个线程各算一次请求。
+
+10 月 20 日教学方临时补全版的 [NCU Details](../reports/CH07/ncu-preflight-2026-10-20-details.txt) 已有实测：
+
+| 模式 | requests | sectors | sectors/request |
+| --- | --- | --- | --- |
+| 连续 | 131072 | 524288 | 4 |
+| 跨步 | 131072 | 4194304 | 32 |
+
+这组计数与上面的 10 月 21 日正式 bench 来自不同运行、不同日期；今天没有重采 NCU。完整采集、CLI 导入和 GUI Details 查看方法集中在 [讲义 NCU 小节](chapters/07_coalescing_ncu.md#正式用一次-ncu-采集解释访问)，不重复维护另一套命令。
+
+缓存可以理解为靠近计算单元、临时保留已取回数据的快速存储。本章普通读取的简化请求路径是“线程 → L1/TEX → 未命中才继续到 L2 → 仍未命中才继续到显存 DRAM”。命中缓存的 sector 访问也计入 L1/TEX 指标；同一 sector 被不同请求访问会重复计数，不是全程序访问过的不同 sector 数量。
+
+例如两组 warp 的请求分别包含 input[0]/input[1]、input[32]/input[33]，每对元素属于同一 sector。若相关数据仍在可用缓存中，后来的请求可能复用已有内容，不必每次从 DRAM 重取；这不假定 warp 编号决定执行先后，也不保证所有请求均命中 L1。<mark>L1/TEX sector 访问次数、缓存未命中次数、实际显存传输字节数、kernel 总耗时，是不同层次的量。</mark> 即便显存字节数增加，访存并行、地址计算和不变的输出写入等因素也会影响总耗时，不能直接同比换算。
+
+本章没有测量 L1/L2 命中率和 DRAM 流量，因此缓存复用是解释可能机制的例子，不是已经测出缓存抵消多少流量；也不能把 2.17 倍耗时精确归因于某一级缓存。指标口径见 [NCU Memory Tables](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#memory-tables)。
+
+### 踩坑记录
+
+本章真实疑问集中在读取索引拆分、内联标记、lambda 与字符串指针数组，以及 sector、缓存与显存流量的区别。用户已主动复述地址排列的主要变量，尚需结合自己的运行结果解释计数和时间边界；不把提问本身当作所有概念已独立掌握。
+
+没有收到用户实际编译、运行或 NCU 采集失败的输出。历史骨架 strided FAIL 是 TODO 占位的预期，今天正式完成版已通过，不记成用户误写。NCU 运行下的耗时不用于替代普通 bench，理论 4/32 也不换算成固定 8 倍减速。缓存、SASS 和内联优化的进一步调优不新增为本章必修。
+
+### 八股自测
+
+给出 i=35 和 i=1025 的跨步输入下标，解释为什么必须保留 base，以及为什么两个模式都读遍所有输入但输出可以不同。再用同一 warp 的地址分布说明连续为 4、跨步为 32 个 sector。
+
+结合一次自己的 check/bench 与 NCU 两结果，说明读取请求数为何可以相同、sector 数为何不同，sector 8 倍为何不等于显存流量或耗时 8 倍，并指出 Event 计时包含和排除的工作。以上为后续验收入口，不把建议操作写成已经完成。
