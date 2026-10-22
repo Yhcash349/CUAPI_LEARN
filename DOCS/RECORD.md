@@ -18,7 +18,7 @@
 | 05 NSYS | RUNNING | 45～60min | — | 未评估 | Codex 源码、讲义、排障与读图讲解 | 用户 _02 采集与 GUI 读图已有报告/截图；三类活动已验证，个人解释待验收 |
 | 06 warp 执行 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、讲解与两处练习补全 | 正式校验、memcheck、计时及 NCU 动态分歧检查通过；用户已有 Source/SASS 关联截图，个人解释验收待补齐 |
 | 07 合并访存与 NCU | RUNNING | 45～60min | — | 未评估 | Codex 骨架、讲解、预检与按要求补全索引 | 正式校验、memcheck 与 Event 通过，历史临时版 NCU 对照通过；用户已复述地址排列对照，个人运行/采集及计数与计时边界解释待验收 |
-| 08 shared 与同步 | TODO | 45～60min | — | 未评估 | 未开始 | — |
+| 08 shared 与同步 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、讲解及按要求补全两处练习 | 正式校验、三种 Sanitizer 与 Event 通过；用户已复述对称读取，读写依赖及两类同步已讲解，个人运行和独立解释待验收 |
 | 09 bank conflict | TODO | 45～60min | — | 未评估 | 未开始 | — |
 | 10 归约 | TODO | 45～60min | — | 未评估 | 未开始 | — |
 | 11 SM 与 occupancy | TODO | 45～60min | — | 未评估 | 未开始 | — |
@@ -337,3 +337,47 @@ Ch07 更新为 RUNNING；实现和验证均由 Codex 按要求完成，用户本
 Ch07 保持 RUNNING，不标 DONE；剩余为用户自己的正确性/计时与两次 NCU 结果对应、sector 与显存流量及时间边界的个人解释。掌握度仍未整体评估，计划学习 45～60 分钟，实际学习和工程准备/agent 执行耗时未记录。NOTE 不另维护进度或工时。
 
 本次只更新 NOTE 与 RECORD，核对现有源码、日志、数据计算、文档链接和 diff 格式；没有重新编译、运行 GPU、计时或采集 NCU/NSYS/Sanitizer。既有源码与报告保留，无临时文件或新增计划范围，无需额外 Claude 审阅，未启动 Claude、未提交或推送，先前工作区改动保留。
+
+## 2026-10-21：Ch08 shared 与同步内容生成及预检
+
+用户明确要求“生成CH08内容”。按 PLAN 阶段 B 新增 [CH08/shared_exchange.cu](../CH08/shared_exchange.cu) 和 [章节讲义](chapters/08_shared_sync.md)，同步 PLAN 目录与准备依据。复用前章错误检查、输入/全量校验与可选 Event 计时，固定每个 block 将自己的有效片段反序，跨 warp 交换 shared 数据；check/race 使用同一个 kernel，只改变是否在读取前执行 block barrier。正式练习保留两处 TODO：同步点和伙伴槽位读取。不提前提供归约、bank conflict 或 NCU 新指标；NOTE 不将未学习内容记成用户成果。
+
+现场复核 NVCC 12.9.86、Compute Sanitizer 2025.2.1.0、GTX 1650 / CC 7.5 / warpSize=32 / 4096 MiB、驱动 610.88；程序查询 sharedMemPerBlock=49152 字节。输入 shape=[1000]、float32、grid=8、block=128，七个完整片段与一个 104 项尾部，每 block shared=512 字节，输入与输出各 4000 字节。所有线程均按本例结构参加同步，无效尾部线程不越界读取或写 output。
+
+最终正式骨架及临时补全版按讲义选项编译无警告。正式 check/bench 均为预期数值 FAIL：mismatches=1000、最大误差 31.75、退出 1，bench 跳过计时。初版占位直接读 input，触发 tile 未使用警告；改为读自己的 shared 槽位后重新完成预检，当前正式代码仍未实现伙伴读取。该警告与修正前后的证据均保留，日志 `FINAL SKELETON` 段对应当前正式源码。
+
+临时版仅填 barrier 与伙伴读取，check/bench 全部 1000 项 PASS、最大误差 0；独立 memcheck（padding=32）、racecheck、synccheck 对 check 均零错误，退出 0。另一次故意缺 barrier 的 race 运行 memcheck 零错误，racecheck 报 shared 写/读冲突、退出 99，数值校验本次仍 PASS。racecheck 摘要为 1 条 error 分析、合并 4000 字节级 hazards，不能写成 4000 个独立 bug。race 模式故意以应用退出 0 结束数值观察，让 Sanitizer 用指定错误码表达检查失败；不能视其应用退出码或数值 PASS 为无竞争证明。
+
+普通计时与 Sanitizer 分开。临时同步版 warmup=10、samples=21、batch=10，最终预检 Event 批次平均每次启动中位数 7.526400 μs，Timing PASS；初版临时预检的 8.873600 μs 也保留在原日志，不把两个运行作优化 A/B。时间不含分配、传输、reference 或回读校验，短 kernel 仍可能受 host 提交间隙影响；本章不计时错误版本，不作 shared 加速结论，可选 bench 不成为必修验收。
+
+原始命令、输出、退出码与两版源码 SHA-256 见 `reports/CH08/preflight-2026-10-21.txt`。临时源码与二进制在核验后清理，正式 build 保留两处 TODO 的练习版本。NCU、NSYS 和 GUI 均 NOT RUN；官方语义按 CUDA 12.9、Compute Sanitizer 文档及本机头文件/CLI 核对。章节源码与文档链接、差异格式已检查，无新增依赖或无效临时产物。
+
+Ch08 更新为 READING；用户本次只提出生成请求，实现练习、个人运行与解释待验收，不记 DONE，不补记 Ch07 或前章完成。计划学习 45～60 分钟，实际学习及工程准备/agent 执行耗时未记录，不从聊天间隔推算。无教学范围偏离，无需额外 Claude 审阅，未启动 Claude、未提交或推送。下一步先预测首尾片段结果，补两处 TODO，重新编译 check，再对照正确/缺同步版本的 racecheck 并解释依赖。
+
+## 2026-10-22：Ch08 两处 TODO 补全与正式验证
+
+用户在阅读课程概述、源码阅读顺序及 main 流程讲解后，明确要求“完成两个todo”。Codex 在 [exchange_block()](../CH08/shared_exchange.cu) 的统一 use_barrier 分支内加入 `__syncthreads()`，并改为 `output[i] = tile[peer]`，移除占位语句与已失效的 TODO 提示，添加同步位置和尾部反序的中文说明。沿用 N=1000、float32、grid=8、block=128、尾部 104 项、shared=512 字节/block；未修改 CPU reference 或扩大教学范围。同步 PLAN 目录注释与讲义当前状态，保留历史骨架预检事实。
+
+现场复核 NVCC 12.9.86、Compute Sanitizer 2025.2.1.0、GTX 1650 / CC 7.5 / warpSize=32 / 4096 MiB、驱动 610.88。正式源码按讲义命令编译无警告，check/bench 均全量 1000 项 PASS、mismatches=0、最大绝对误差 0。独立 memcheck（padding=32）、racecheck、synccheck 对 check 均零错误，退出 0。故意缺同步的 race 另经 memcheck 零错误，racecheck 报出 shared 第 38 行写入与第 46 行读取冲突，合并 4000 个字节级 hazards 为 1 条 error 分析，退出 99；该运行数值仍 PASS，不当作无竞争证明。
+
+普通 bench 与 Sanitizer 分开执行：warmup=10、samples=21、batch=10，Event 批次平均每次启动中位数 12.102400 μs、Timing PASS。时间不含分配、传输或校验，仍可能包含 host 提交间隙；不与历史预检作优化性能 A/B，不测缺同步版本速度。本次 NCU、NSYS 与 GUI 均 NOT RUN，全部命令、输出、退出码和正式源码 SHA-256 见 [completed-2026-10-22.txt](../reports/CH08/completed-2026-10-22.txt)。正式 build 已更新，无临时尝试产物。
+
+Ch08 更新为 RUNNING；实现和验证由 Codex 按用户要求完成，用户已有源码阅读和提问，个人运行、对 shared 作用域、写后读同步、尾部片段及 racecheck 证据的解释仍待验收，不记 DONE。实际学习及工程准备/agent 执行耗时未记录。文档链接与差异格式检查通过，无计划范围偏离或新增依赖，无需额外 Claude 审阅，未启动 Claude、未提交或推送，既有改动保留。
+
+## 2026-10-22：Ch08 现有可执行文件实验现象观察
+
+用户已主动复述 kernel 是在 block 内读取与自身对称的 shared 槽位，作为局部理解证据；随后阅读 benchmark，并要求根据生成的可执行文件说明实验现象。Codex 直接运行现有 `build/CH08/shared_exchange`，未重新编译或修改源码。GTX 1650 / CC 7.5、N=1000、float32、grid=8、block=128、尾部 104 项、shared=512 字节/block；普通 check 全量 PASS、最大误差 0，output[0]=31.75、output[896]=249.75，与 reference 一致。
+
+普通 bench 先校验，通过后按 warmup=10、samples=21、batch=10 采样，本次 Event 批次平均每次启动中位数 14.627200 μs、Timing PASS。独立 racecheck 对 check 为零错误、退出 0；对缺 barrier 的 race 报第 38 行 shared 写入与第 46 行读取冲突，1 条 error 分析合并 4000 字节级 hazards、退出 99，数值本次仍 PASS。核心现象为有同步可正确交接，缺同步可能数值仍正确但检查出缺失的读写顺序保证；本次未测错误版本性能，不推断 shared 加速或历史时间差原因。
+
+命令、输出、退出码及现有二进制/源码 SHA-256 保存在 [observe-2026-10-22.txt](../reports/CH08/observe-2026-10-22.txt)。工具运行与普通计时分开；本次未重跑 memcheck/synccheck、NCU、NSYS 或 GUI，未生成临时尝试产物。Ch08 保持 RUNNING，用户已解释对称读取，但个人操作、同步和工具证据的独立解释仍待验收；实际学习与工程执行用时未记录。仅补充 RECORD 与局部理解证据，无计划偏离，无需额外 Claude 审阅，未提交或推送。
+
+## 2026-10-22：Ch08 本章总结
+
+按用户“总结本章内容”的要求，在 NOTE 新增 Ch08 汇总，覆盖 shared 的 block 作用域、片段反序与尾部 104 项、main/launch 的 CPU 数据流、GPU 写入与伙伴读取、barrier 与 host 等待的区别、benchmark 预热和 Event 批次中位数、正确性与 racecheck 证据。保留用户真实提问及对称读取的主动复述，重点解释“不同位置的读取为何仍依赖其他线程先写好”，不把示意执行顺序写成本次真实硬件轨迹。
+
+总结重读源码和两份已有日志：observe 中 check/race 数值均 PASS，racecheck 分别零冲突/检出 shared 写读冲突，普通同步版 Event 中位数 14.627200 μs；completed 中三种正确性工具零错误，另一轮普通中位数 12.102400 μs。明确来自不同运行，工具检查与普通计时分开，不把数值 PASS 等同于无竞争，不将多次计时作优化 A/B，也不推断固定性能收益。
+
+Ch08 保持 RUNNING。用户已解释对称读取，barrier、跨线程写后读依赖与 host 同步边界已讲解，尚未收到用户个人运行或对这些边界的独立复述，不记 DONE；掌握度未整体评估。实现和工具验证由 Codex 完成，计划学习 45～60 分钟，实际学习及工程执行耗时未记录。NOTE 用两段自测衔接后续验收，不增加首轮范围。
+
+本次仅更新 NOTE 与 RECORD，核对现有源码、既有实验日志、数值、文档链接及 diff 格式，没有重新编译、运行 GPU、计时或采集工具。无计划偏离、依赖变化或临时产物，无需额外 Claude 审阅，未启动 Claude、未提交或推送，既有工作区改动保留。

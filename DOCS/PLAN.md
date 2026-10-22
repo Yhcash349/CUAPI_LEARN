@@ -150,7 +150,8 @@ CH04/                                       # 正确计时已按要求补全并�
 CH05/                                       # 独立 vector_add.cu，NSYS 采集练习
 CH06/                                       # warp/lane 与分路条件已按要求补全，个人解释待验收
 CH07/                                       # 连续/跨步读取索引已按要求补全，个人采集与解释待验收
-CH08/ ... CH19/                              # 按需创建
+CH08/                                       # shared 交换与 block barrier 已按要求补全，个人解释待验收
+CH09/ ... CH19/                              # 按需创建
 common/                                      # 逐步提取的检查、计时 helper
 scripts/                                     # 按需新增 env/profile/export 脚本
 DOCS/chapters/XX_topic.md                     # 一章一份简短任务和实验记录
@@ -198,3 +199,4 @@ Reference 查参数、错误与同步语义，Programming Guide 查执行机制�
 | 2026-10-08 | 准备 Ch06 独立 warp/lane 与两种分支分组练习，完成临时补全版正确性、计时与编译产物预检 | 用户明确要求“生成CH06内容”；保留两处关键 TODO 和前章待验收项，SASS 仅由教学方预检，不提前引入 NCU 或扩展课程范围 |
 | 2026-10-20 | 在 Ch06 增加可选 NCU 动态分支观察，保留 Ch07 正式引入 NCU 的安排 | 用户明确询问如何用 NSYS/NCU 观察 warp divergence；仅采集已有程序两次 launch，不新增课程必修或重构代码 |
 | 2026-10-20 | 准备 Ch07 独立连续/跨步读取练习与两个 NCU 访存计数器的正式教学 | 用户明确要求“生成CH07内容”；固定相同输入集合、读取/写出项数和加法次数，保留一处索引 TODO；前章解释待验收继续保留，无首轮范围扩展 |
+| 2026-10-21 | 准备 Ch08 独立 shared 数据交换与 block barrier 练习、racecheck 错误对照 | 用户明确要求“生成CH08内容”；固定每 block 片段反序，只对照读取前有无 barrier，保留两处 TODO；包含不足整 block 的尾部，不引入 bank conflict 或新指标，不补记前章完成 |

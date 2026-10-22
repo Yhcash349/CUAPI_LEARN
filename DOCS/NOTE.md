@@ -560,3 +560,100 @@ NCU 对本例只选 access_pattern 的两次 check 启动，第一个结果为�
 给出 i=35 和 i=1025 的跨步输入下标，解释为什么必须保留 base，以及为什么两个模式都读遍所有输入但输出可以不同。再用同一 warp 的地址分布说明连续为 4、跨步为 32 个 sector。
 
 结合一次自己的 check/bench 与 NCU 两结果，说明读取请求数为何可以相同、sector 数为何不同，sector 8 倍为何不等于显存流量或耗时 8 倍，并指出 Event 计时包含和排除的工作。以上为后续验收入口，不把建议操作写成已经完成。
+
+## 2026-10-22 Ch08：shared 数据交换与 block 同步
+
+### 今日完成任务
+
+围绕 [CH08/shared_exchange.cu](../CH08/shared_exchange.cu) 阅读实验参数、main 数据流、kernel 的对称读取，以及 benchmark 的 Event 批次采样。骨架在 10 月 21 日生成，今天按用户“完成两个todo”的要求，由 Codex 补全 barrier 与伙伴槽位读取，完成正式编译、全量校验、Sanitizer 检查和普通计时；随后直接运行已有可执行文件，观察同步/缺同步模式。运行命令集中在 [章节讲义](chapters/08_shared_sync.md)，工程进度和工作量只在 [RECORD](RECORD.md) 维护。
+
+用户主动复述了“每个 block 内线程去读取与自己对称的 shared 位置”，这是对 kernel 功能的局部理解证据。用户随后追问 barrier 是否就是最后的同步，以及不同线程只是取不同位置为何仍会冲突；已结合写入阶段和跨 warp 例子讲解。实现和工具运行由 Codex 完成，尚未收到用户自己的运行输出或对同步依赖的独立复述，不据此认定整章掌握。
+
+### 基本概念
+
+**shared 是 block 内共用的暂存区**
+
+shared memory 可以理解为同一个 block 共用的工作台：每个线程先放上自己的数据，再取走伙伴放的数据。`__shared__ float tile[kBlock]` 在每个 block 内各有一份，128 个 float 共 512 字节，生存期随该 block；本例的 tile 用于 block 内交换。main 的 cudaMalloc 分配输入/输出 global memory，tile 则在 kernel 内声明。
+
+<span style="color:red">用户提问：这个 kernel 的功能，就是每个 block 内的线程读取该 block 中与自己对称的 shared 位置吗？</span>
+
+是。固定 N=1000、block=128、grid=8，七个完整 block 各处理 128 项，最后一个处理 104 项。`t` 是 block 内线程编号，`base` 是本片段起点，`i=base+t` 是全局下标，`count` 是本片段有效项数，`peer=count-1-t` 是伙伴槽位编号。<mark>输出为每个 block 对应的有效片段分别反序。</mark>
+
+```cpp
+tile[t] = valid ? input[i] : 0.0f;
+if (use_barrier) {
+    __syncthreads();
+}
+if (valid) {
+    const int peer = count - 1 - t;
+    output[i] = tile[peer];
+}
+```
+
+完整 block 中线程 0 读取 tile[127]、线程 127 读取 tile[0]；尾部线程 0 读取 tile[103]。无效尾部线程 t=104～127 写零、参加本例的集合点，但不读取越界 input，也不写 output。输入为 input[i]=i*0.25f，因此 output[0]=input[127]=31.75，output[896]=input[999]=249.75。
+
+**barrier 建立写入与伙伴读取的先后关系**
+
+<span style="color:red">用户提问：barrier 是什么，就是最后的同步吗？本次实验是否对照加同步和不加同步？只是让不同线程取对称位置，为什么会与其他线程冲突？</span>
+
+barrier 是集合点。本例的 `__syncthreads()` 位于 shared 写入之后、伙伴读取之前，等待同一 block 的线程到达，并让此前写入对 block 内线程可见。`use_barrier` 在一次 launch 内取值一致，所有线程选择同一分支；不能将本例集合点移入只有部分线程满足的 if(valid)。128 个线程含四个 warp，伙伴交接跨越 warp，不能用单个 warp 的同步覆盖全部依赖。
+
+<mark>不同线程的读取彼此不冲突，但读取的槽位由另一个线程负责写入；必须保证伙伴先写好，自己再读取。</mark> 输入已从 CPU 传入 global memory，也不代表线程已经把它搬到了 shared。以下只是一种可能的错误执行顺序，用于理解风险，不是本次工具还原的实际执行轨迹：
+
+```text
+线程 0：   写 tile[0]
+线程 0：   读 tile[127]  ← 伙伴可能尚未写好
+线程 127： 写 tile[127]
+```
+
+这里的风险是线程 0 对 tile[127] 的读取与线程 127 对同一槽位的写入缺少顺序保证。本例先写一轮、再读一轮，读完不覆盖复用 shared，所以一个写后读 barrier 足够；循环复用时是否需要额外同步留到后续实际程序。
+
+| 同步位置 | 谁在等待 | 本例作用 |
+| --- | --- | --- |
+| kernel 中间的 `__syncthreads()` | 同一 block 的线程 | 保证写完 shared 后再互相读取 |
+| main 的 `cudaDeviceSynchronize()` | CPU 调用线程 | 等待此前 GPU 工作完成，再回读结果 |
+
+<mark>kernel 完成后的 host 等待，不能补救 kernel 内部已发生的过早读取。</mark> 语义参考 [CUDA 12.9 Synchronization Functions](https://docs.nvidia.com/cuda/archive/12.9.0/cuda-c-programming-guide/index.html#synchronization-functions)。
+
+**main 组织 CPU 与 GPU 数据流**
+
+<span style="color:red">用户提问：如何阅读当前 cu 文件，main 函数整个是什么流程？</span>
+
+建议先看参数，再沿 main→launch→exchange_block 阅读执行流程，随后用 make_reference/validate 理解校验，最后看 benchmark。main 和 launch 在 CPU 上执行，exchange_block 在 GPU 上执行。main 的流程是：选择模式、打印配置、CPU 准备输入与 reference、GPU 分配和 H2D、启动 kernel、等待完成、D2H、全量校验、按需计时、释放内存和返回状态。
+
+`argc==1` 表示只有程序名，默认 check；否则从 argv[1] 取得模式。`strcmp(a,b)==0` 表示字符串内容相同。check 启用 barrier，bench 先校验再计时，race 传入 false 跳过 barrier。`!unsafe` 因此是启动时的 use_barrier 参数。`reference` 是 CPU 按每片首尾反向生成的正确答案，不调用 kernel 的 shared 实现；validate 检查全部 1000 项，示例打印不替代全量校验。
+
+**benchmark 测的是同步版本的批次平均时间**
+
+<span style="color:red">用户指定 benchmark() 代码段要求讲解，并要求根据生成的可执行文件说明实验现象。</span>
+
+benchmark 的 input/output 指向 GPU 数组，reference/host_output 是 CPU 数组；后两者按引用传入，const reference 只读。先以 use_barrier=true 预热 10 次，等待完成，再创建 start/stop Event。每个样本在同一默认 stream 中依次记录 start、提交 10 次 kernel、记录 stop；等待 stop 完成后取得毫秒差，乘 1000 转微秒、除以 10，得到本批平均每次启动时间。
+
+一共最多采 21 个样本，每批结束回读并校验最后一次启动留下的输出，同时要求时间有限且大于零；失败则停止后续采样，不打印有效中位数。全部通过后排序，取第 11 个值，最后销毁 Event。每次仍读相同 input、覆盖相同 output，不把前次反序结果当作下次输入。
+
+<mark>最终统计是“21 个批次平均每次启动时间的中位数”。</mark> 预热、分配、H2D/D2H、CPU reference 和回读校验不在 Event 区间内；短 kernel 的区间仍可能包含 host 提交间隙。本章只测同步版本，不拿缺同步版本作速度比较。
+
+**实验现象：缺同步可以数值 PASS，但仍有读写竞争**
+
+以下引自 10 月 22 日已有 [observe 日志](../reports/CH08/observe-2026-10-22.txt)，本次总结只重读证据，没有重新运行。环境为 GTX 1650 / CC 7.5，N=1000、float32、grid=8、block=128。
+
+| 模式 | 数值结果 | racecheck 结果 |
+| --- | --- | --- |
+| check，有 barrier | 全部 1000 项 PASS，误差 0 | 零冲突，退出 0 |
+| race，无 barrier | 本次也全部 PASS，误差 0 | 检出 shared 第 38 行写与第 46 行读的冲突，退出 99 |
+
+racecheck 将 4000 个字节级 hazards 合并为 1 条 error 分析，不能当作 4000 个独立 bug。<mark>数值 PASS 只说明本次结果符合 reference，不能证明读写顺序可靠。</mark> race 模式的应用退出码故意为 0，让工具在检测错误时通过 --error-exitcode 99 报告检查失败，因此应用退出成功也不是无竞争证明。工具职责见 [Compute Sanitizer](https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html#racecheck-tool)。
+
+同一 observe 日志中，普通 bench 的 Event 中位数为 14.627200 μs/次；这是与 racecheck 分开的普通运行。更早的 [正式完成版验证](../reports/CH08/completed-2026-10-22.txt) 已有 check 的 memcheck、racecheck、synccheck 零错误，以及另一轮 bench 的 12.102400 μs/次。它们来自不同运行，不作优化 A/B，不推断时间波动原因或 shared 固定加速比。
+
+### 踩坑记录
+
+本章实际疑问是把“读取位置不同”理解为没有线程间冲突，以及把 block 内 barrier 与最后的 host 等待混淆。关键是补上 shared 的写入阶段：自己要读的槽位由伙伴写入，需要明确先写后读；同一 block 的线程进度不能靠猜。已经讲解这一边界，但尚未收到用户对它的独立复述。
+
+用户已经准确复述对称读取的功能，不能笼统写成没有理解证据。代码两处补全、正式编译及工具运行由 Codex 完成；没有用户独立实现、个人运行输出或工具操作截图，不虚构用户发生过编译、运行故障。缺同步数值仍 PASS 是本例真实观测，不是要求通过多跑几次制造 FAIL。bank conflict、归约和底层指令优化不扩展为本章内容。
+
+### 八股自测
+
+用自己的话解释线程 0 读取 tile[127] 时依赖谁的写入，以及为什么 main 最后的 cudaDeviceSynchronize 不能代替 kernel 内的 __syncthreads。结合现有 check/race 两结果，说明为什么两者数值都 PASS，racecheck 却不同。
+
+再解释最后一个 block 为什么使用 count=104、线程 0 为什么读 tile[103]、无效线程为什么仍参加本例集合点，并说明 14.627200 μs 的统计方式与不包含的工作。以上用于后续验收，不将已讲解视为已独立掌握。
