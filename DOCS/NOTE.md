@@ -657,3 +657,122 @@ racecheck 将 4000 个字节级 hazards 合并为 1 条 error 分析，不能当
 用自己的话解释线程 0 读取 tile[127] 时依赖谁的写入，以及为什么 main 最后的 cudaDeviceSynchronize 不能代替 kernel 内的 __syncthreads。结合现有 check/race 两结果，说明为什么两者数值都 PASS，racecheck 却不同。
 
 再解释最后一个 block 为什么使用 count=104、线程 0 为什么读 tile[103]、无效线程为什么仍参加本例集合点，并说明 14.627200 μs 的统计方式与不包含的工作。以上用于后续验收，不将已讲解视为已独立掌握。
+
+## 2026-10-26 Ch09：shared 布局、bank conflict 与 NCU 计数
+
+### 今日完成任务
+
+按用户“总结本章内容”的要求，汇总本章源码阅读与提问。围绕 [CH09/bank_conflict.cu](../CH09/bank_conflict.cu)，已讲解参数、二维线程坐标与 warp 分组、shared 寻址、转置读写、template、volatile、循环展开，以及 NCU 冲突指标的位置、分批服务和大数值的来源。运行命令与教学任务见 [章节讲义](chapters/09_bank_conflict.md)，进度和工作量只在 [RECORD](RECORD.md) 维护。
+
+骨架在 10 月 22 日生成；10 月 23 日按用户要求，由 Codex 完成唯一的 shared_index 地址 TODO 并验证正式程序。本次只重读源码及已有报告，没有重新运行实验。用户明确表示不理解 x/y、warp 归属与循环赋值，并继续追问 bank conflict；这些是实际理解难点，尚未收到用户独立实现、个人运行/采集输出或完整解释，不据提问推定已经掌握。
+
+### 基本概念
+
+**程序任务与参数：每个 block 转置一个小矩阵**
+
+<span style="color:red">用户提问：先讲解一下参数设置含义；完成 TODO，并告诉我这里整个 kernel 主要是什么功能。</span>
+
+输入为 1024 个独立的 32×32 float32 小矩阵，输出将每片分别转置，即交换行列。kSide=32、kTileElements=1024、kTiles=1024、kN=1048576；输入和输出各占 4 MiB。每个 block 负责一个小片，base=blockIdx.x*1024 定位当前片段，不交换小片的位置。
+
+kRows=8 决定 block=(32,8)，每个 block 有 256 个线程、8 个 warp，每线程搬运 4 项，合计覆盖 1024 项。kRows 是线程组织高度，矩阵仍有 32 行。kSharedElements=32*33=1056 个 float，每个 block 两种布局均预留 4224 字节；stride 32 使用前 1024 个槽位，stride 33 每行末尾留一个空位，空位不属于逻辑矩阵。
+
+普通 bench 的 kWarmup=10、kSamples=21、kBatch=5：先预热 10 次，每个 Event 区间连续启动 5 次，区间时间除以 5 得到每次启动的批次平均值，再对 21 个样本取中位数。分配、传输及 CPU 校验不在 Event 区间中，可能的 host 提交间隙仍可能影响结果。check 则只分别启动两种布局，不执行预热与重复计时。
+
+**二维坐标先转一维编号，再组成 warp**
+
+<span style="color:red">用户提问：不太懂 x、y 有什么区别，也不懂“每个 warp 固定 y，x=0..31”；warp 到底如何组织，怎么知道哪些线程属于一个 warp？</span>
+
+可以把当前 block 逻辑上看成 8 排、每排 32 个座位。每个线程同时具有 x 和 y：x 是排内座位号，y 是排号，这不是 GPU 上的物理座位布局。CUDA 按 x 优先增加的顺序编号，二维 block 中：
+
+```cpp
+int tid = threadIdx.x + blockDim.x * threadIdx.y;
+int warp_in_block = tid / 32;
+int lane = tid % 32;
+```
+
+同一 block 内连续 32 个编号组成一个 warp，不跨 block。本例 tid=x+32*y，因此 y=0、x=0..31 是 warp 0，y=1、x=0..31 是 warp 1，以此类推。线程 (x=3,y=2) 的 tid=67，属于 warp 2、lane 3。
+
+<mark>“同一个 warp 固定 y”来自本例 blockDim.x=32，并不是任意二维 block 都成立。</mark> 若 block=(16,16)，warp 0 会包含 y=0 和 y=1 的各 16 个线程。归属按编号计算，不能根据线程碰巧何时运行来判断。[CUDA Thread Hierarchy](https://docs.nvidia.com/cuda/archive/12.9.0/cuda-c-programming-guide/index.html#thread-hierarchy) / [SIMT Architecture](https://docs.nvidia.com/cuda/archive/12.9.0/cuda-c-programming-guide/index.html#simt-architecture)
+
+**两轮循环：先按行搬入，再按列读出**
+
+<span style="color:red">用户提问：这个循环里面的赋值逻辑不太懂；output[base + col * kSide + x] 是什么意思？</span>
+
+每个线程独立执行循环，j=0、8、16、24。第一轮 row=y+j，线程将输入第 row 行、第 x 列放到 shared 的同一逻辑位置；例如 (x=3,y=2) 负责第 2、10、18、26 行的第 3 列。同一个 warp 的 x 覆盖 0..31，所以每轮沿完整的一行连续搬运。
+
+```cpp
+tile[shared_index(row, x, Stride)] = input[base + row * 32 + x];
+__syncthreads();  // 实际源码位于整个写入循环之后，等待所有线程完成四项写入。
+```
+
+整个写入循环结束后执行 block barrier，再进入读取循环。第二轮 col=y+j，读取 shared 的第 x 行、第 col 列，写到输出第 col 行、第 x 列：
+
+```cpp
+output[base + col * 32 + x] = tile[shared_index(x, col, Stride)];
+```
+
+这里 col 沿用输入列号，转置后成为输出行号。base 找到当前小矩阵，col*32 跳过输出的 col 整行，x 再定位该行中的列。例如 base=0、col=2、x=3 时写 output[67]，即输出第 2 行、第 3 列，数据来自输入第 3 行、第 2 列。同一个 warp 的 global 写出仍连续。
+
+**shared_index 与 padding：位置改变，逻辑数据保持一致**
+
+<span style="color:red">用户提问：stride 如何通过 shared_index 影响实验结果，如何体现 shared memory bank conflict？</span>
+
+当前 helper 为 `return row*stride+col;`，stride 的单位是 float 槽位。它先找到行起点，再加列偏移；写入和读取共用同一个映射，因此 padding 后仍能找到原来的逻辑数据。global 地址、工作量、barrier 和 shared 预留大小都保持不变，转置输出应一致。历史占位版固定使用行跨度 32，数值也能 PASS，所以正确性本身不能证明 padding 已生效。
+
+本机本例的 tile 按 bank 0 对齐，每线程每条读取处理一个 32-bit float，可用 float 槽位下标模 32 得到 bank 编号。按行写入的下标为 row*Stride+x，warp 中相邻 x 落在不同 bank；按列读取的下标为 x*Stride+col，同一个 warp 中 col 固定：
+
+| 行跨度 | col=0 时线程 0、1、2、31 的 shared 下标 | 对应 bank |
+| --- | --- | --- |
+| 32 | 0、32、64、992 | 0、0、0、0 |
+| 33 | 0、33、66、1023 | 0、1、2、31 |
+
+<mark>stride 32 使同列的不同地址挤在一个 bank；stride 33 通过每行空一个位置，把这些访问分散到全部 bank。</mark> 多线程读取同一个 32-bit 字可以广播，不属于本例的不同地址冲突。Ch07 的 global 合并访存关注数据落在哪些 sector；本章关注 shared 地址落在哪些 bank，二者不能混为同一个指标。[CUDA 12.9：Shared Memory and Memory Banks](https://docs.nvidia.com/cuda/archive/12.9.0/cuda-c-best-practices-guide/index.html#shared-memory-and-memory-banks)
+
+**template、volatile 与循环展开的作用**
+
+<span style="color:red">用户提问：template 模板什么作用？volatile 什么作用？#pragma unroll 什么作用？</span>
+
+`template<int Stride>` 让一份源码按编译期整数生成不同版本，`shared_transpose<32>` 和 `<33>` 的地址计算分别使用固定的 32 和 33。调用中的 `<32>` 选择模板版本，`<<<...>>>` 指定 grid/block，`(input,output)` 传运行时数据。
+
+`__shared__` 决定 tile 放在 shared memory，`volatile` 限制部分读写优化，帮助本微基准保留希望观察的访问。它不保证源码访问与硬件访问严格一一对应，也不提供线程间同步；写后读交接仍需要 `__syncthreads()`。不能把 volatile 当成消除数据竞争的办法。[CUDA 12.9：Volatile Qualifier](https://docs.nvidia.com/cuda/archive/12.9.0/cuda-c-programming-guide/index.html#volatile-qualifier)
+
+`#pragma unroll` 作用于紧随其后的循环；本例循环次数在编译期固定，展开后逻辑上相当于直接写出 j=0、8、16、24 四份搬运操作，便于减少循环控制及优化固定偏移。每个线程依然处理四项，线程数不变，不保证四份操作同时执行，也不预设一定更快。[CUDA 12.9：pragma unroll](https://docs.nvidia.com/cuda/archive/12.9.0/cuda-c-programming-guide/index.html#pragma-unroll)
+
+**bank conflict 的分批服务与 NCU 大计数**
+
+<span style="color:red">用户提问：发生 bank conflict 时是怎样分批的？在 NCU 哪里看指标？Bank Conflicts 是什么，为什么数字这么大？</span>
+
+可以把 bank 看成并行服务窗口。本例一次 warp 标量读取中，每个 bank 在一批中服务一个不同的 float，不同 bank 可并行；同 bank 的不同 float 需要分批。这类服务批次在 NCU 中称为 wavefront。stride 32 的同列读取需要 32 批，stride 33 可一批完成；若 32 个请求均匀分布到 16 个 bank、每个 bank 有两个不同 float，则两批、每批服务 16 个 bank。warp 成员不变，实际先服务哪个线程不保证按 lane 编号，不能把示意顺序当成硬件轨迹。
+
+本章 [正式 NCU 报告](../reports/CH09/completed-2026-10-23.ncu-rep) 只专门采集冲突指标，优先在 GUI 的 Raw 页筛选 bank_conflicts。`l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum` 对应 shared 读取，`..._st.sum` 对应写入；sum 汇总本次 kernel 各硬件实例。若采集完整访存表，可在 Details 的 Memory Workload Analysis Tables → Shared Memory 看 Bank Conflicts 列。显示约 1.02 M 可能是 1015808 的缩写。[NCU Raw Page](https://docs.nvidia.com/nsight-compute/NsightCompute/index.html#raw-page)
+
+对本例的 32-bit 标量读取，无冲突时每请求一批；32 路冲突时每请求 32 批，额外 31 批。每个 kernel 的 1024 个 block、每 block 8 个 warp、每 warp 4 次 shared 读取，合计 32768 次请求，因此：
+
+```text
+1024 × 8 × 4 × (32 - 1) = 1,015,808
+```
+
+这一推导与本机本例的读取冲突实测完全一致，不泛化为任意访问宽度或任意 kernel 的计数恒等式。两种 kernel 分别计数，普通 bench 的预热和 21×5 次重复不计入这次 NCU check 结果。<mark>Bank Conflicts 是累计访问效率计数，不是 bank 数量、不同地址个数、内存错误数或总耗时倍数。</mark> 32 路冲突也不直接推出整个 kernel 慢 32 倍。[NCU Shared Memory](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#shared-memory) / [Compute Triage Guide](https://docs.nvidia.com/nsight-compute/ComputeTriage/)
+
+**正式结果与证据边界**
+
+以下重读 10 月 23 日已有 [正式验证日志](../reports/CH09/completed-2026-10-23.txt) 和 [指标 CSV](../reports/CH09/completed-metrics-2026-10-23.csv)，环境为 GTX 1650 / CC 7.5、NVCC 12.9.86、NCU/Compute Sanitizer 2025.2.1.0，shape/dtype 与上文一致。本次总结未重新运行。
+
+| 布局 | 数值校验 | shared 读取冲突 | shared 写入冲突 | 普通 Event 中位数 μs/次 |
+| --- | --- | --- | --- | --- |
+| stride 32 | 1048576 项 PASS，误差 0 | 1015808 | 0 | 189.683199 |
+| stride 33 | 1048576 项 PASS，误差 0 | 0 | 0 | 68.320000 |
+
+两模式 memcheck、racecheck、synccheck 均零错误，racecheck 零 warnings。普通计时与工具运行分开，统计为 21 个批次平均每次启动时间的中位数；本轮比值约 2.776，仅用于当前设备、输入与测量边界，不与 10 月 22 日的临时版或骨架跨运行比较，也不保证所有 GPU 有相同收益。<mark>barrier 保证交接顺序，padding 改善 bank 分布；数据竞争和 bank conflict 分别属于正确性与访问效率问题。</mark>
+
+### 踩坑记录
+
+用户明确暴露的难点是二维线程编号、warp 如何分组、循环中谁负责哪些元素，以及输出一维下标为何对应转置。已用 (x=3,y=2)、block=(16,16) 反例和输入/输出行列对应关系解释，不将这些已讲解例子写成用户独立复述。
+
+用户还追问了限定符、循环展开、硬件分批与大冲突计数。复习时应分清线程组织、shared 逻辑布局、物理 bank 和工具累计口径；避免把每行 32 个线程当成任意 block 的固有规则，把 volatile 当同步，或把 1015808 当成错误数。正式 helper 由 Codex 按要求补全，没有用户误写、编译失败或个人 GUI 操作的证据；不编造这些经历。更深的 bank 调度电路、SASS 后缀与性能归因不新增为首轮门槛。
+
+### 八股自测
+
+不用查看答案，说明本章线程 (x=3,y=2) 的 tid、warp、lane，以及第一轮循环读哪四个输入位置；再解释把 block 换成 (16,16) 时，为什么同一 warp 的 y 可以不同。结合读写代码，说明 output[base+col*32+x] 的行列含义，以及 stride 改变后为什么输出数据保持相同。
+
+手算同一 warp 读取第 0 列时 stride 32/33 的 bank 分布，解释额外 31 批的来源，并用启动规模推导 1015808；指出 NCU 的查看入口、冲突计数与普通计时的区别，以及 volatile、barrier、padding 各自负责什么。以上为后续验收问题，不把已有讲解或 Codex 验证计为个人掌握。

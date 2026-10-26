@@ -19,7 +19,7 @@
 | 06 warp 执行 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、讲解与两处练习补全 | 正式校验、memcheck、计时及 NCU 动态分歧检查通过；用户已有 Source/SASS 关联截图，个人解释验收待补齐 |
 | 07 合并访存与 NCU | RUNNING | 45～60min | — | 未评估 | Codex 骨架、讲解、预检与按要求补全索引 | 正式校验、memcheck 与 Event 通过，历史临时版 NCU 对照通过；用户已复述地址排列对照，个人运行/采集及计数与计时边界解释待验收 |
 | 08 shared 与同步 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、讲解及按要求补全两处练习 | 正式校验、三种 Sanitizer 与 Event 通过；用户已复述对称读取，读写依赖及两类同步已讲解，个人运行和独立解释待验收 |
-| 09 bank conflict | TODO | 45～60min | — | 未评估 | 未开始 | — |
+| 09 bank conflict | RUNNING | 45～60min | — | 未评估 | Codex 骨架、按要求补全地址练习及源码/指标讲解 | 正式校验、三种 Sanitizer、Event 与 NCU 通过；线程组织、转置、bank 分批与 1,015,808 计数已讲解并总结，个人运行和独立解释待验收 |
 | 10 归约 | TODO | 45～60min | — | 未评估 | 未开始 | — |
 | 11 SM 与 occupancy | TODO | 45～60min | — | 未评估 | 未开始 | — |
 | 12 数据复用 | TODO | 45～60min | — | 未评估 | 未开始 | — |
@@ -381,3 +381,37 @@ Ch08 更新为 RUNNING；实现和验证由 Codex 按用户要求完成，用户
 Ch08 保持 RUNNING。用户已解释对称读取，barrier、跨线程写后读依赖与 host 同步边界已讲解，尚未收到用户个人运行或对这些边界的独立复述，不记 DONE；掌握度未整体评估。实现和工具验证由 Codex 完成，计划学习 45～60 分钟，实际学习及工程执行耗时未记录。NOTE 用两段自测衔接后续验收，不增加首轮范围。
 
 本次仅更新 NOTE 与 RECORD，核对现有源码、既有实验日志、数值、文档链接及 diff 格式，没有重新编译、运行 GPU、计时或采集工具。无计划偏离、依赖变化或临时产物，无需额外 Claude 审阅，未启动 Claude、未提交或推送，既有工作区改动保留。
+
+## 2026-10-22：Ch09 bank conflict 内容生成及预检
+
+用户明确要求“生成CH09内容”。按 PLAN 阶段 B 新增 [CH09/bank_conflict.cu](../CH09/bank_conflict.cu) 与 [章节讲义](chapters/09_bank_conflict.md)，同步 PLAN 目录和准备依据。复用 Ch08 的 shared 写入、barrier、读取与前章校验/计时骨架，固定 1024 个 32×32 小片分别转置，只比较 shared 行跨度 32/33；global 地址、操作数、block、barrier 及 shared 预留大小均保持一致。正式源码保留一处 shared_index 地址 TODO；占位版忽略 stride，因此两模式数值都能 PASS，须以 NCU 计数确认 padding 已生效，不能仅凭输出正确或 stride_arg 标签验收。
+
+现场复核 NVCC 12.9.86、NCU/Compute Sanitizer 2025.2.1.0、GTX 1650 / CC 7.5 / warpSize=32 / 4096 MiB、驱动 610.88。shape=[1024,32,32]、float32、N=1048576、grid=1024、block=(32,8)，输入/输出各 4 MiB。两模式 cudaFuncGetAttributes 与编译资源报告均为 shared=4224 字节、20 registers/thread、local=0；stride 32 保留未使用空间，避免把 shared 资源预留差异引入本章对照。只处理完整 tile，不新增尾部算法任务。
+
+正式骨架和临时补全版编译均无警告，各自 check/bench 每模式全量 1048576 项 PASS、误差 0。两版各自 check 的 memcheck（padding=32）、racecheck、synccheck 均零错误，racecheck 零 warnings，退出 0。临时版仅将 shared_index 的固定行跨度占位改成使用传入 stride，未改 global 数据流、CPU reference 或同步。教学方核验 SASS，两种临时布局各保留四条标量 STS、一个 BAR.SYNC、四条标量 LDS.U，没有将目标访问消除；指令后缀不用于单独判断各 lane 地址或有无冲突，不变成学生首轮门槛。
+
+NCU 仅采集 shared_transpose 的前两次 launch，读取 l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum 与对应 st.sum。正式骨架的 stride_arg=32/33 均为读取冲突 1015808、写入冲突 0；临时补全版分别为读取冲突 1015808/0、写入冲突均为 0。报告导出的两行结果已用 CSV 按指标名核对，摘要保存在 [metrics-2026-10-22.csv](../reports/CH09/metrics-2026-10-22.csv)。本机 CLI 的指标查询和安装文档也确认了 shared_ld_bank_conflict/shared_st_bank_conflict 映射；线上 NCU 2025.2 归档页面访问失败，通用语义参考当前官方页，实际版本、选项和指标依据本机 2025.2.1。
+
+普通 bench 与工具采集分开，warmup=10、samples=21、batch=5。骨架两参数的 Event 批次平均每次启动中位数为 189.760005/193.075204 μs，临时补全版为 195.417595/69.984001 μs，临时版本轮比值约 2.792。时间不含分配、传输和 CPU 校验；包括 kernel 的 global/shared、barrier 与可能的 host 提交间隙。只记录当前设备与输入，不把不同预检运行作优化 A/B，也不将 32 路 bank conflict 推成固定 32 倍 kernel 耗时。
+
+全部命令、原始输出、退出码、源码 SHA-256 与资源报告见 [preflight-2026-10-22.txt](../reports/CH09/preflight-2026-10-22.txt)，两版 NCU/SASS 文件链接集中在讲义。临时补全源码与二进制核验后清理，正式 build 保留 TODO 骨架。NSYS、GUI 均 NOT RUN；未新增依赖，NOTE 不提前记录为用户已学会。
+
+Ch09 更新为 READING。用户本次只提出生成请求，TODO、个人运行/采集与独立解释待验收，不记 DONE，不改变前章状态。计划学习 45～60 分钟，实际学习与工程准备/agent 执行耗时未记录。无计划范围偏离，无需额外 Claude 审阅，未启动 Claude、未提交或推送。下一步先预测两种 bank 分布，完成一处地址转换，重新编译检查，再用 NCU 两结果解释 padding 与 global 合并访存、数据竞争的区别。
+
+## 2026-10-23：Ch09 地址 TODO 补全与正式验证
+
+用户要求“完成todo，并告诉我这里整个kernel主要是什么功能”。Codex 将 `CH09/bank_conflict.cu` 的 shared_index 改为 `row*stride+col`，移除 `(void)stride` 和过时占位提示；global 索引、输入、CPU reference、block、循环及同步均未改变。同步更新讲义的当前实现、历史占位版边界与本次证据，PLAN 目录说明更新为已补全，保留既有工作区改动。kernel 的功能为每个 block 转置一个独立 32×32 小矩阵，按行写 shared、barrier 后按列读、连续写 global；stride 32/33 只改变 shared 布局，两种输出必须一致。
+
+现场复核 NVCC 12.9.86、NCU/Compute Sanitizer 2025.2.1.0、GTX 1650 / CC 7.5 / warpSize=32 / 4096 MiB、驱动 610.88。shape=[1024,32,32]、float32、N=1048576、grid=1024、block=(32,8)，两模式 shared 均为 4224 字节。正式编译无警告，check/bench 每模式全量 PASS、误差 0；check 的 memcheck（padding=32）、racecheck、synccheck 均零错误，racecheck 零 warnings，退出 0。NCU 过滤 shared_transpose、采集两次 launch，读取 bank conflict 为 1015808/0，写入均为 0，按指标名解析 CSV 核对正式布局已生效。
+
+独立普通 bench 为 warmup=10、samples=21、batch=5，Event 批次平均每次启动中位数为 189.683199/68.320000 μs，本轮比值约 2.776，不含分配、传输和 CPU 校验，可能包含 host 提交间隙；不推断通用加速比，不与历史预检跨运行比较。命令、输出、退出码和正式源码 SHA-256 见 [completed-2026-10-23.txt](../reports/CH09/completed-2026-10-23.txt)，报告为 [completed-2026-10-23.ncu-rep](../reports/CH09/completed-2026-10-23.ncu-rep)，解析摘要为 [completed-metrics-2026-10-23.csv](../reports/CH09/completed-metrics-2026-10-23.csv)。本次 NSYS、GUI、SASS 均 NOT RUN，无临时源码或新增依赖。
+
+Ch09 更新为 RUNNING，实现和验证由 Codex 完成；用户已要求讲解参数与 kernel 功能，但个人运行、bank 映射及 padding 的独立解释待验收，不记 DONE。计划学习 45～60 分钟，实际学习与工程执行耗时未记录。无计划范围偏离，无需额外 Claude 审阅，未启动 Claude、未提交或推送。
+
+## 2026-10-26：Ch09 本章总结
+
+按用户“总结本章内容”的要求，在 NOTE 新增 Ch09 汇总，覆盖参数与 block 工作划分、二维线程一维编号及 warp/lane 计算、两轮循环和转置输出索引、shared_index 的 stride 32/33 映射、template/volatile/pragma unroll、bank 分批服务、NCU Raw/访存表入口及累计冲突口径。按 NOTE 既有格式保留用户真实问题和理解难点，用标记突出关键结论；不把用户尚未给出的独立复述或 GUI 操作记成掌握证据。
+
+重读正式源码、10 月 23 日验证日志及 NCU 指标 CSV：两模式 1048576 项 PASS、误差 0，三种 Sanitizer 零错误，shared 读冲突 1015808/0、写冲突均为 0，独立 Event 中位数 189.683199/68.320000 μs、本轮比值约 2.776。通过 1024 blocks×8 warps×4 次读取×31 额外批次解释本例大计数，限定为本机该标量读取实验，未泛化到其他访问宽度或所有 kernel；工具与普通计时、历史预检与正式版分别表述。
+
+本次只更新 NOTE 与 RECORD，核对源码、既有日志、计算和本地文档链接及差异格式；没有重新编译、运行 GPU、计时、采集 profiler 或操作 GUI，未新增临时产物。Ch09 保持 RUNNING，用户个人运行与对 warp 分组、转置读写、bank 映射和指标口径的独立解释仍待验收，不记 DONE；实际学习与工程执行耗时未记录。无计划范围偏离、依赖变更或新增课程门槛，无需额外 Claude 审阅，未启动 Claude、未提交或推送，既有工作区改动保留。
