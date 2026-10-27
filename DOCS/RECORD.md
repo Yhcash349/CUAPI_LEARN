@@ -20,7 +20,7 @@
 | 07 合并访存与 NCU | RUNNING | 45～60min | — | 未评估 | Codex 骨架、讲解、预检与按要求补全索引 | 正式校验、memcheck 与 Event 通过，历史临时版 NCU 对照通过；用户已复述地址排列对照，个人运行/采集及计数与计时边界解释待验收 |
 | 08 shared 与同步 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、讲解及按要求补全两处练习 | 正式校验、三种 Sanitizer 与 Event 通过；用户已复述对称读取，读写依赖及两类同步已讲解，个人运行和独立解释待验收 |
 | 09 bank conflict | RUNNING | 45～60min | — | 未评估 | Codex 骨架、按要求补全地址练习及源码/指标讲解 | 正式校验、三种 Sanitizer、Event 与 NCU 通过；线程组织、转置、bank 分批与 1,015,808 计数已讲解并总结，个人运行和独立解释待验收 |
-| 10 归约 | TODO | 45～60min | — | 未评估 | 未开始 | — |
+| 10 归约 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、两处 TODO 补全、验证及源码/实验讲解 | 正式逐片/总和、三种 Sanitizer 与 Event 通过；用户已复述 shuffle 仍为树形归约，属性、mask、跨 warp 交接已讲解并总结，个人运行及完整独立解释待验收 |
 | 11 SM 与 occupancy | TODO | 45～60min | — | 未评估 | 未开始 | — |
 | 12 数据复用 | TODO | 45～60min | — | 未评估 | 未开始 | — |
 | 13 Host 异步 | TODO | 45～60min | — | 未评估 | 未开始 | — |
@@ -415,3 +415,47 @@ Ch09 更新为 RUNNING，实现和验证由 Codex 完成；用户已要求讲解
 重读正式源码、10 月 23 日验证日志及 NCU 指标 CSV：两模式 1048576 项 PASS、误差 0，三种 Sanitizer 零错误，shared 读冲突 1015808/0、写冲突均为 0，独立 Event 中位数 189.683199/68.320000 μs、本轮比值约 2.776。通过 1024 blocks×8 warps×4 次读取×31 额外批次解释本例大计数，限定为本机该标量读取实验，未泛化到其他访问宽度或所有 kernel；工具与普通计时、历史预检与正式版分别表述。
 
 本次只更新 NOTE 与 RECORD，核对源码、既有日志、计算和本地文档链接及差异格式；没有重新编译、运行 GPU、计时、采集 profiler 或操作 GUI，未新增临时产物。Ch09 保持 RUNNING，用户个人运行与对 warp 分组、转置读写、bank 映射和指标口径的独立解释仍待验收，不记 DONE；实际学习与工程执行耗时未记录。无计划范围偏离、依赖变更或新增课程门槛，无需额外 Claude 审阅，未启动 Claude、未提交或推送，既有工作区改动保留。
+
+
+## 2026-10-26：Ch10 归约内容生成与预检
+
+用户明确要求“生成CH10内容”。按 PLAN 阶段 B 新增 [CH10/reduction.cu](../CH10/reduction.cu) 与 [章节讲义](chapters/10_reduction.md)，更新 PLAN 目录与准备依据、NOTE 预习入口。固定 N=262144、float32、grid=1024、block=256，每线程读取一项，GPU 每 block 输出一个和，CPU 汇总 1024 个片段和。主要变量为 shared 树形与 warp shuffle 的协作方式；保留 shared 累加和 shuffle 取值累加两处关键 TODO。输入全部覆盖完整 warp，最后一轮由 warp 0 的 32 个 lane 读取 8 个有效和及 24 个零，不引入尾部 mask、atomic、跨 block GPU 归约或新 profiler 指标。
+
+现场复核 GTX 1650 / CC 7.5 / warpSize=32 / 4096 MiB、驱动 610.88，NVCC 12.9.86、Compute Sanitizer 2025.2.1.0。输入 1 MiB、输出 4 KiB，以包含正负数和零的小整数 float 逐片校验，CPU reference 使用 double 顺序加法。本例的整数范围允许精确比较，不推广为任意浮点归约必须误差 0。正式骨架与临时两阶段补全版均编译无警告；正式骨架两方法各 1014 个 partial 不匹配、最大误差 232、总和 -11（期望 -184），check/bench 预期退出 1，bench 拒绝计时。临时只补 TODO(1) 时 shared PASS、shuffle FAIL；两处补全后两方法的 1024 个 partial 均 PASS、最大误差 0、总和 -184、第一片 -189，check/bench 退出 0。
+
+正式骨架与临时补全版各自执行 memcheck（padding=32）、racecheck、synccheck，均无工具错误，racecheck 无 warnings。骨架因数值未完成退出 1，工具打印 Target application returned an error；临时补全版均退出 0，区分算法校验与访问/同步检查。临时补全版资源为 shared=1024/32 字节每 block、寄存器=12/14 每线程、均无 spill；教学方查看 SASS，shared 版保留树形交接，shuffle 版保留 SHFL 和 block barrier，未把静态指令当动态计数或用户必学内容。
+
+独立普通 bench 为 warmup=10、samples=21、batch=10，shared/shuffle 的 Event 批次平均每次启动中位数为 49.526399/29.548800 μs，本轮比值 1.676。区间不含分配、传输、CPU 校验及最终汇总，可能含 host 提交间隙；不把差值单独归因于 barrier，不推断固定加速比。原始命令、源码 SHA-256、输出、退出码、资源及 SASS 见 [preflight-2026-10-26.txt](../reports/CH10/preflight-2026-10-26.txt)。临时补全源码与二进制已清理，正式 build 保留 TODO 骨架；NCU、NSYS、GUI 均 NOT RUN，无新增依赖。
+
+Ch10 更新为 READING，TODO、个人运行与独立解释待验收；Codex 提供并验证骨架和临时补全版，不把预检计为用户完成，不改变前章待验收状态。计划学习 45～60 分钟，实际学习与工程准备/agent 执行耗时未记录。NOTE 只新增预习提示，不编造用户问题或掌握证据。无计划范围偏离，无需额外 Claude 审阅，未启动 Claude、未提交或推送。下一步先预测 8 项缩小例子的合并，再分两步补 TODO、重新编译、校验和解释 shared/barrier 与 shuffle 的交接边界。
+
+
+## 2026-10-27：Ch10 shared 归约 TODO(1) 补全与验证
+
+用户明确要求“完成TODO1，并告诉我这个kernel的功能”。Codex 在 `block_sum_shared()` 的 tid<stride 分支内加入 `tile[tid] += tile[tid + stride];`，移除该 TODO 标记并解释片段合并；保留 TODO(2) 与 shuffle 实现原状。更新程序提示、PLAN 目录说明及讲义的当前阶段，保留 10 月 26 日预检的历史事实。kernel 每 block 用 256 个线程读取连续 256 项，经 shared 逐轮合并为一个 partial，由线程 0 写出；1024 个 block 独立处理各片，最后由 CPU 汇总。
+
+现场复核 GTX 1650 / CC 7.5 / warpSize=32 / 4096 MiB、驱动 610.88，NVCC 12.9.86、Compute Sanitizer 2025.2.1.0。固定 N=262144、float32、grid=1024、block=256，重新编译无警告；shared 的全部 1024 个片段和 PASS、最大误差 0、总和 -184、第一片 -189。shuffle 因 TODO(2) 尚未完成而 FAIL，整个 check 预期退出 1，不能误报整章两种方法均通过。
+
+对正式 check 执行 memcheck（padding=32）、racecheck、synccheck，均零工具错误，racecheck 零 warnings；均因 shuffle 数值未完成而继承退出 1，Target application returned an error 不作为内存/同步错误。命令、源码 SHA-256、输出和退出码见 [shared-completed-2026-10-27.txt](../reports/CH10/shared-completed-2026-10-27.txt)。本次 bench、NCU、NSYS、GUI 均 NOT RUN，未新增临时源码或二进制，无依赖变化。
+
+Ch10 更新为 CODING，shared 实现及验证由 Codex 完成；TODO(2)、个人操作与独立解释待验收，不记 DONE。NOTE 补充本次 kernel 功能与数据交接的讲解，不把已讲解当成用户掌握。计划用时 45～60 分钟，实际学习及工程执行耗时未记录；无计划范围偏离，无需额外 Claude 审阅，未启动 Claude、未提交或推送，保留既有工作区改动。
+
+
+## 2026-10-27：Ch10 shuffle TODO(2) 补全与正式验证
+
+用户明确要求“完成TODO2”。Codex 在 `warp_sum()` 的 offset=16、8、4、2、1 循环内实现 `value += __shfl_down_sync(0xffffffffu, value, offset);`，移除占位和失效的 TODO 提示，添加完整 warp 同时交换片段和的中文说明；调用布局、跨 warp shared 交接和 block barrier 保持不变。更新 PLAN 目录、讲义当前行为和 NOTE 的阶段性失败说明，保留历史预检及只完成 TODO(1) 的记录。
+
+现场复核 GTX 1650 / CC 7.5 / warpSize=32 / 4096 MiB、驱动 610.88，NVCC 12.9.86、Compute Sanitizer 2025.2.1.0。N=262144、float32、grid=1024、block=256，重新编译无警告；正式 shared/shuffle 各检查全部 1024 个片段和，均 PASS、mismatches=0、最大误差 0、总和 -184、第一片 -189。两种方法的 check 经 memcheck（padding=32）、racecheck、synccheck 均零错误，racecheck 零 warnings，所有命令退出 0。
+
+独立普通 bench 为 warmup=10、samples=21、batch=10，同 stream Event 批次平均每次启动中位数为 shared 29.046401 μs、shuffle 16.640000 μs，本轮比值 1.746、Timing PASS。区间不含分配、传输、CPU 校验或汇总，可能含 host 提交间隙；不与历史运行作性能 A/B，不把比值泛化或全部归因于减少 barrier。命令、源码 SHA-256、原始输出和退出码见 [completed-2026-10-27.txt](../reports/CH10/completed-2026-10-27.txt)。本次 NCU、NSYS、GUI 均 NOT RUN，未创建临时源码或二进制，无新增依赖。
+
+Ch10 更新为 RUNNING，两处实现和验证均由 Codex 按用户要求完成；个人运行、shared 轮间依赖及完整 warp shuffle 的独立解释仍待验收，不记 DONE。计划学习 45～60 分钟，实际学习及工程执行耗时未记录。无计划范围偏离，无需额外 Claude 审阅，未启动 Claude、未提交或推送，既有改动保留。
+
+
+## 2026-10-27：Ch10 本章总结
+
+按用户“总结本章内容”的要求，整合 NOTE 原有的 shared 片段求和与 shuffle 补全说明，形成完整 Ch10 复盘。覆盖 kernel 属性查询、host 数据流与 CPU 汇总范围、shared 树形合并和轮间依赖、shuffle 的 per-lane value/full mask/offset、跨 warp shared 交接与 warp 0 的零填充合并、__forceinline__、校验和 Event 边界。保留用户实际提问及“shuffle 仍然是树形归约”的主动复述，用于局部理解证据，不编造用户实现或工具操作。
+
+重读正式源码、章节讲义及当日 completed 日志：两方法各 1024 个 partial PASS、最大误差 0、总和 -184、第一片 -189；三种 Sanitizer 零错误、racecheck 零 warnings。静态 shared=1024/32 字节每 block，源码 barrier 次数=9/1，普通 Event 中位数=29.046401/16.640000 μs，本轮比值 1.746（warmup=10、samples=21、batch=10）。明确源码计数与硬件动态指标、工具与普通计时、本轮结果与历史预检的边界，不把收益全部归因于单个因素或泛化到其他设备输入。
+
+本次仅更新 NOTE 与 RECORD，并核对源码 SHA-256、日志数值、文档链接与 diff 格式；没有重新编译、运行 GPU、计时或采集 profiler，无新临时产物。Ch10 保持 RUNNING，用户已有树形归约与通信差别的局部复述，个人运行及对 shared 轮间依赖、完整 warp 参与和跨 warp 数据流的完整独立解释仍待验收，不记 DONE。实际学习及工程执行耗时未记录。无计划偏离、新依赖或新增课程门槛，无需额外 Claude 审阅，未启动 Claude、未提交或推送，既有工作区改动保留。

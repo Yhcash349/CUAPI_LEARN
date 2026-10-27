@@ -8,6 +8,12 @@
 
 初始阶段只完成了课程讨论与 Codex 环境预检；后续已讲解 Ch00 并按用户要求提供完整代码，仍没有用户独立掌握的验收证据。后续解释从具体 shape、线程或一次数据流开始，先给直觉，再给术语，避免因为这里出现名词就跳过教学。
 
+## Ch10 阅读入口（2026-10-26）
+
+[归约讲义](chapters/10_reduction.md) 从“256 个线程手里的数怎样合成一个和”开始。先复用 shared 与 block barrier 合并片段和，再用 warp shuffle 在同一 warp 内直接交换线程手里的值；跨 warp 的 shared 交接仍需 barrier。本章固定完整 warp，只要求理解局部合并和交接，不扩展尾部 mask 或全 GPU 多级归约。
+
+入口讲义保留原练习路线，本页末尾的 Ch10 总结整理实际提问、树形合并与跨 warp 交接。阅读重点是每轮谁写、下一轮谁读，以及为什么最后只有 8 个有效 warp 和时仍让完整 32 lanes 参与 shuffle。
+
 ## 首轮贯穿的观察问题
 
 | 观察问题 | 将使用的程序证据 |
@@ -776,3 +782,111 @@ output[base + col * 32 + x] = tile[shared_index(x, col, Stride)];
 不用查看答案，说明本章线程 (x=3,y=2) 的 tid、warp、lane，以及第一轮循环读哪四个输入位置；再解释把 block 换成 (16,16) 时，为什么同一 warp 的 y 可以不同。结合读写代码，说明 output[base+col*32+x] 的行列含义，以及 stride 改变后为什么输出数据保持相同。
 
 手算同一 warp 读取第 0 列时 stride 32/33 的 bank 分布，解释额外 31 批的来源，并用启动规模推导 1015808；指出 NCU 的查看入口、冲突计数与普通计时的区别，以及 volatile、barrier、padding 各自负责什么。以上为后续验收问题，不把已有讲解或 Codex 验证计为个人掌握。
+
+
+## 2026-10-27 Ch10：归约与 warp shuffle
+
+### 今日完成任务
+
+围绕 [CH10/reduction.cu](../CH10/reduction.cu) 对照 shared 树形归约和 warp shuffle 归约。用户先阅读 kernel 属性查询，再要求 Codex 依次完成两处 TODO，随后追问 shuffle 语句、`__forceinline__` 和跨 warp 的合并过程，并讨论实验现象。两处实现及程序、工具验证均由 Codex 完成；用户已有局部复述，不记为独立实现或整章掌握。运行方法和原始证据见 [章节讲义](chapters/10_reduction.md) 与 [正式验证日志](../reports/CH10/completed-2026-10-27.txt)。
+
+### 基本概念
+
+**任务、数据流与输出范围**
+
+归约就是把许多输入逐步合成一个结果，本章求和。固定 N=262144、float32、grid=1024、block=256，每线程读取一个数，每个 block 负责连续 256 项，输出一个片段和。
+
+```text
+CPU 生成输入与 reference → H2D
+  → 1024 个 block 各自将 256 项合为 1 项
+  → D2H 回读 1024 个 partial → 逐片校验 → CPU 汇总总和
+```
+
+<mark>两个 kernel 的输出都是 1024 个 block 和，最终总和由 CPU 汇总。</mark> 本章没有实现 kernel 内跨 block 同步、atomic 或第二级 GPU 归约。逐片校验能发现总和中可能相互抵消的错误，不能只核对一个总和。
+
+**查询 kernel 属性**
+
+<span style="color:red">用户提问：cudaFuncAttributes 和两次 cudaFuncGetAttributes 这一段什么意思？</span>
+
+`cudaFuncAttributes shared_attr{}, shuffle_attr{};` 创建并初始化两个属性结构体。`cudaFuncGetAttributes(&shared_attr, block_sum_shared)` 在 host 侧查询指定 kernel 的属性，将结果写进 shared_attr，返回值由 CUDA_CHECK 检查；它没有启动求和 kernel。后面的 sharedSizeBytes 表示该 kernel 每个 block 所需的静态 shared 字节数，不包括 launch 时请求的 dynamic shared。本例分别为 256×4=1024 和 8×4=32 字节。
+
+**shared 树形归约：每轮合并两份已有的和**
+
+<span style="color:red">用户提问：完成 TODO1，并告诉我这个 kernel 的功能。</span>
+
+线程 tid 先把 input[blockIdx.x*256+tid] 放到 tile[tid]，首次 barrier 保证输入全部写好。随后 stride=128、64、32、16、8、4、2、1，每轮只有 tid<stride 的线程执行：
+
+```cpp
+tile[tid] += tile[tid + stride];
+```
+
+参与合并的片段数量从 256→128→64→…→1；最终线程 0 把 tile[0] 写进 partial[blockIdx.x]。以本片相对下标为例，stride=128 后 tile[0] 包含输入 0、128，tile[64] 包含输入 64、192；stride=64 时线程 0 合并两份已有和，结果包含四项。
+
+<mark>下一轮读取依赖其他线程上一轮已经写完；所有线程都必须到达轮间 barrier。</mark> 所以 `__syncthreads()` 位于 if 外，不做加法的线程仍参与同步。host 上等待 kernel 完成的 cudaDeviceSynchronize 无法补上 kernel 内缺失的交接顺序。
+
+**shuffle：同一树形思路，改变数据交换方式**
+
+<span style="color:red">用户提问：value += __shfl_down_sync(0xffffffffu, value, offset); 怎么理解？</span>
+
+每个线程有自己独立的 value。shuffle 从同一 warp 的 lane+offset 取回伙伴的当前 value，+= 再把它累加到自己的 value；交换不经过 shared 中转。mask=0xffffffffu 的 32 位全为 1，表示完整 32 lanes 参与，u 表示无符号整数。所有参与 lane 执行同一个 intrinsic 并使用相同 mask。[CUDA 12.9：Warp Shuffle Functions](https://docs.nvidia.com/cuda/archive/12.9.0/cuda-c-programming-guide/index.html#warp-shuffle-functions)
+
+```cpp
+for (int offset = 16; offset > 0; offset /= 2) {
+    value += __shfl_down_sync(0xffffffffu, value, offset);
+}
+```
+
+若 lane 0..31 最初分别持有 1..32，offset=16 时 lane 0 得到 1+17=18，lane 8 得到 9+25=34；offset=8 时 lane 0 取得的是伙伴已合并的 34，自己的结果变成 52。继续 offset=4、2、1，最终 lane 0 得到 528。每轮读取的是本次交换时伙伴的当前值，不是永远读取最初输入，也不是按 lane 编号顺序逐个更新。
+
+<mark>本例只使用 lane 0 的完整 warp 和，其他 lane 不保证同样得到全和。</mark> 默认 width=32，源 lane 超过 31 时 shuffle 返回调用者自己的值，不自动补零；这些高 lane 的无用结果不会进入 lane 0 的完整和。`_sync` 协调指定 warp 成员参与交换，不提供 shared memory 的内存顺序保证，也不能跨 warp 取值。
+
+**跨 warp：shared 交接，再由 warp 0 合并**
+
+<span style="color:red">用户提问：这里如何实现跨 warp 的归约？</span>
+
+一个 block 有 8 个 warp，第一轮各自在 lane 0 得到 32 项和，再执行 warp_partial[warp]=value。整个 block 到达 `__syncthreads()` 后，这 8 个片段和才交给 warp 0：lane 0..7 各读一个 warp_partial，lane 8..31 输入 0。
+
+```text
+8 个 warp 分别求和 → [S0,S1,…,S7] 写 shared → block barrier
+  → warp 0 的 32 lanes 持有 [S0,S1,…,S7,0,…,0]
+  → warp_sum → lane 0 写出本 block 的和
+```
+
+具体到线程，tid=32 是 warp 1 的 lane 0，它写 warp_partial[1]；同步后，tid=1 是 warp 0 的 lane 1，它读取这个槽位。跨 warp 的交接通过 shared 和 block barrier 完成，最后的加法归约发生在 warp 0 内部。
+
+if (warp==0) 包含该 warp 的全部 32 个 lane，满足 full mask 的参与要求。只有 8 个有效和不等于只让 8 个 lane 调用 shuffle：其余 24 个 lane 用零参与。不能把调用条件改成 lane<8 后仍沿用 full mask。本章只处理固定完整 warp，任意长度与尾部 mask 留给选修。
+
+**`__forceinline__`：把短函数体内联到调用位置**
+
+<span style="color:red">用户提问：<code>__forceinline__</code> 是干啥的，我又忘了。</span>
+
+`__device__` 表明 warp_sum 是 GPU 侧函数；`__forceinline__` 要求编译器将函数内联，可以理解为把函数逻辑直接放到调用位置，省去独立函数调用/返回并方便优化。它适合这里短小的 helper，但不保证性能必然提高；这是编译方式，不承担线程同步作用。[CUDA 12.9：函数内联限定符](https://docs.nvidia.com/cuda/archive/12.9.0/cuda-c-programming-guide/index.html#noinline-and-forceinline)
+
+**实验现象与用户的局部理解**
+
+<span style="color:red">用户复述：我看其实 shuffle 一个 warp 里面还是树形归约的逻辑，只不过同步和读取 shared memory 的开销小一些，对吗？</span>
+
+<mark>shuffle 版仍然是逐轮合并片段和的树形归约，主要改变线程之间传值和同步的方式。</mark> shared 版通过 shared 交接，每轮都等待整个 block；shuffle 版在 warp 内直接交换线程寄存器中的值，跨 warp 时再保留 shared 与一次 block barrier。这是用户已主动表达的局部理解，不据此推断已经独立解释全部数据流或完成个人操作。
+
+以下重读当日已有正式日志，环境为 GTX 1650 / CC 7.5、NVCC 12.9.86、Compute Sanitizer 2025.2.1.0。本次总结没有重新编译或运行。
+
+| 实现 | 静态 shared / block | 每 block 源码 barrier 次数 | 片段和校验 / CPU 汇总总和 | 普通 Event 中位数 μs/次 |
+| --- | --- | --- | --- | --- |
+| shared 树形 | 1024 字节 | 9（首次装载后 + 8 轮） | 1024 项 PASS，误差 0 / -184 | 29.046401 |
+| warp shuffle | 32 字节 | 1（跨 warp 交接） | 1024 项 PASS，误差 0 / -184 | 16.640000 |
+
+两种实现第一片均为 -189，memcheck（padding=32）、racecheck、synccheck 均零错误，racecheck 零 warnings。输入是混合正负小整数，相关整数和可用 float 精确表示，因此要求误差 0；一般浮点输入改变归约顺序可能改变舍入，不套用这里的精确相等。
+
+计时先校验、各预热 10 次，21 个样本，每个同 stream Event 区间启动 10 次，归一化到每次启动后取中位数。它不含分配、H2D/D2H、CPU 校验和最终汇总，可能含 host 提交间隙；工具检查与普通 bench 分开。本轮 shared/shuffle 比值为 1.746，体现本机该输入下 shuffle 版更快，不把收益全部归因于单个因素，也不推断通用加速比。表中的 barrier 数来自源码，不是本次新采集的硬件动态计数；本次总结未采集 NCU、NSYS 或操作 GUI。
+
+### 踩坑记录
+
+实际疑问集中在 kernel 属性查询、每轮拿到的 value、限定符和跨 warp 数据交接。复习时应分清查询属性与启动 kernel、参与加法与参与同步、warp 内交换与跨 warp shared 交接。shuffle 的 full mask 要求完整参与，不能因为只使用 lane 0 的结果就只让 lane 0 调用。
+
+历史上只完成 TODO(1) 时 shared PASS、shuffle FAIL、整个程序退出 1；这属于阶段性算法未完成，不是 shared 失败或 Sanitizer 检出错误。当前两处均完成，check、三种工具检查和 bench 均退出 0。没有用户误写、编译错误或个人工具操作的证据，不编造学习经历。
+
+### 八股自测
+
+不看答案，解释 shared 版 stride=64 时线程 0 为什么已合并四项，为什么 barrier 必须位于 if 外；再追踪 tid=32 写出的 warp 和如何交给 tid=1，说明最后仅 8 个有效和时为何仍由 32 lanes 参与 shuffle。
+
+用自己的话区分树形归约算法与 shared/shuffle 的通信方式，解释 `__forceinline__` 的作用，并指出本轮 Event 1.746 倍比较包含和排除了哪些工作。这些是后续验收问题，不把已有讲解或 Codex 验证当成用户已完整回答。

@@ -152,7 +152,8 @@ CH06/                                       # warp/lane 与分路条件已按要
 CH07/                                       # 连续/跨步读取索引已按要求补全，个人采集与解释待验收
 CH08/                                       # shared 交换与 block barrier 已按要求补全，个人解释待验收
 CH09/                                       # shared stride 32/33 地址练习已按要求补全，个人解释待验收
-CH10/ ... CH19/                              # 按需创建
+CH10/                                       # shared / warp shuffle 归约均已按要求补全，个人解释待验收
+CH11/ ... CH19/                              # 按需创建
 common/                                      # 逐步提取的检查、计时 helper
 scripts/                                     # 按需新增 env/profile/export 脚本
 DOCS/chapters/XX_topic.md                     # 一章一份简短任务和实验记录
@@ -202,3 +203,4 @@ Reference 查参数、错误与同步语义，Programming Guide 查执行机制�
 | 2026-10-20 | 准备 Ch07 独立连续/跨步读取练习与两个 NCU 访存计数器的正式教学 | 用户明确要求“生成CH07内容”；固定相同输入集合、读取/写出项数和加法次数，保留一处索引 TODO；前章解释待验收继续保留，无首轮范围扩展 |
 | 2026-10-21 | 准备 Ch08 独立 shared 数据交换与 block barrier 练习、racecheck 错误对照 | 用户明确要求“生成CH08内容”；固定每 block 片段反序，只对照读取前有无 barrier，保留两处 TODO；包含不足整 block 的尾部，不引入 bank conflict 或新指标，不补记前章完成 |
 | 2026-10-22 | 准备 Ch09 独立 shared stride 32/33 转置练习与 NCU bank-conflict 对照 | 用户明确要求“生成CH09内容”；仅改变 shared 行跨度，固定 global 访问、工作量与预留 shared，保留一处地址 TODO；教学方完成编译产物与动态计数预检，不补记前章完成，无首轮范围扩展 |
+| 2026-10-26 | 准备 Ch10 独立 shared 树形与 warp shuffle 归约练习及预检 | 用户明确要求“生成CH10内容”；固定完整 warp、每 block 256 项，CPU 汇总 block 和，保留两处关键 TODO；不引入尾部 mask、跨 block GPU 归约或新增 profiler 门槛，不补记前章完成 |
