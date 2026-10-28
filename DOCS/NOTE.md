@@ -22,6 +22,12 @@
 
 2026-10-28 用户先后要求 Codex 补全两处练习。`active_blocks_per_sm()` 根据 kernel、kBlock 和 dynamic_bytes 查询每 SM 理论驻留 block 数，输出写入 blocks；查询不会启动 kernel，也不改变实际预留量。随后 `launch()` 将 requested_bytes 作为第三个启动参数，为每个 block 实际预留相应的动态 shared；静态 32 字节仍另外计入。只完成查询的阶段，实际预留曾全部为 0；当前两处均完成，NCU 已核对三组动态预留量。两处实现和验证由 Codex 完成，个人独立解释待验收。
 
+## Ch12 阅读入口（2026-10-28）
+
+[数据复用讲义](chapters/12_data_reuse.md) 从“相邻输出会重复使用同一份输入”开始。一个线程负责 C 的一个元素，一个 block 合作装载两块 16×16 的输入到 shared，沿 K 分段累加。阅读时区分线程负责搬的元素与它计算时读取的元素，结合具体线程说明谁写、谁读，以及为何每轮装载后与覆盖前都要 barrier。
+
+源码最初保留装载与累加两处练习，2026-10-28 已按用户要求由 Codex 补全：各线程按 A 的 (row,base+tx) 与 B 的 (base+ty,col) 装载，越界填零，再用 a_tile[ty][p] 与 b_tile[p][tx] 逐项乘加。host 提供 naive 对照、CPU double reference、尾部边界校验和 Event 骨架。减少源码 global 读取不等于 DRAM 流量或耗时同比下降；本章先用正确性和实测观察复用，不扩展完整 GEMM 优化体系。本页末尾的 Ch12 总结整理参数、语法、分块累加的实际复述及访存疑问，不将讲解或 Codex 验证直接记为独立掌握。
+
 ## 首轮贯穿的观察问题
 
 | 观察问题 | 将使用的程序证据 |
@@ -1002,3 +1008,106 @@ Event 先全量校验，再各预热 10 次、21 个样本，每样本批量启�
 不看答案，指出查询函数的四个参数与第三个 launch 参数分别做什么，说明静态 32 字节来自哪行代码；用 256 线程、warpSize=32 和每 SM 的资源上限，推导三种预留量为什么得到 4/3/1 个 block 和 100%/75%/25% 理论 occupancy。
 
 再解释 NCU 的 23.570222 个平均 warp 如何对应 73.656944%，为什么平均值可以有小数、等待内存的 warp 仍可能计入 active，以及本次 occupancy 降到四分之一为什么不意味着耗时变成四倍。以上是待独立回答的验收问题，不将已讲解或 Codex 验证计为用户已掌握。
+
+## 2026-10-28 Ch12：分块矩阵乘法与数据复用
+
+### 今日完成任务
+
+围绕 [CH12/tiled_gemm.cu](../CH12/tiled_gemm.cu) 对照 naive 与单层 shared tiled FP32 GEMM。两处装载/累加练习按用户要求由 Codex 实现和验证；用户阅读参数及枚举语法，主动询问 base 和分块数据流，随后正确复述了“一个线程负责一个输出、A/B 小块沿 K 移动、各轮行列片段乘加累积到 sum”的主线。该复述是局部理解证据，不替代个人实现、运行及对同步和缓存的完整解释。相关工程与验收记录统一见 [RECORD](RECORD.md)。
+
+### 基本概念
+
+**从输出位置理解矩阵乘法**
+
+A[M,K] 与 B[K,N] 相乘得到 C[M,N]。每个输出是 A 的一行与 B 的一列的点积：`C[row,col]=Σ A[row,q]*B[q,col]`，q 从 0 到 K-1。行连续存储时，A 的下标是 `row*K+q`，B 是 `q*N+col`，两者行步长不同。
+
+一个线程始终计算同一个 C[row,col]，一个 16×16 block 的 256 个线程负责 C 的一个固定 16×16 区域。主实验 M=N=K=256，grid=(16,16)，共 256 个 block，输出 65536 项。block 的 x 对应输出列、y 对应输出行。naive 每线程直接读取 global 完成全部 K 项；tiled 用 shared 协作安排输入复用，每线程的输出归属不变。
+
+**参数、算法选择与 C++ 语法**
+
+<span style="color:red">用户提问：讲解一下参数设置；这是什么语法；什么叫作用域枚举？</span>
+
+`kTile=16` 同时控制本例的 block 两维、输入小块两维和每轮 K 分段长度；两个 float[16][16] 数组共占每 block 2048 字节静态 shared。它是固定教学配置，不代表硬件要求或性能最优。`constexpr` 表示这里的值可在编译期确定。
+
+`kWarmup=10` 是每种方法的预热次数，不进入统计；`kSamples=21` 表示取 21 个计时样本；每个样本用一对同 stream Event 包住 `kBatch=5` 次启动，时间除以 5 后排序，取第 11 项作为中位数。`kAtol=kRtol=1e-4` 只用于结果判断：`abs(gpu-ref)<=1e-4+1e-4*abs(ref)`。绝对容差照顾接近零的值，相对容差随参考值大小变化；NaN/Inf 拒绝。它们不改变 kernel 的计算精度或过程。
+
+`enum class Method { Naive, Tiled };` 定义算法选择类型，作用域枚举将成员名放在类型内部，使用 `Method::Naive` 或 `Method::Tiled`，不同枚举可以各有自己的同名成员。`name(Method method)` 将选择转换为输出文字；`const char*` 在此返回只读字符串，函数前 `static` 限定当前源文件使用，`条件 ? 值1 : 值2` 在条件成立时选前者、否则选后者。
+
+**base 怎样让同一输出分轮累加**
+
+<span style="color:red">用户提问：没太看懂分块逻辑，base 是什么？每线程负责 C 的一个位置，block 有两个 shared 输入切片，但理不清关系。</span>
+
+<mark>C 的输出 tile 固定，base 表示本轮在 K 维的起点：A 小块向右移动，B 小块向下移动。</mark> 主实验 base=0,16,...,240，共 16 轮；每轮覆盖 16 项乘加，两个 shared 数组大小保持不变，内容逐轮替换。
+
+只看第一个 block，表中区间都含两端：
+
+| base | A 小块的全局范围 | B 小块的全局范围 | 每个输出本轮累加的 K 项 |
+| --- | --- | --- | --- |
+| 0 | 行 0..15、列 0..15 | 行 0..15、列 0..15 | 0..15 |
+| 16 | 行 0..15、列 16..31 | 行 16..31、列 0..15 | 16..31 |
+| 240 | 行 0..15、列 240..255 | 行 240..255、列 0..15 | 240..255 |
+
+每线程每轮只搬一个 A 元素和一个 B 元素，256 个线程共同填满两个 tile。下式省略边界判断，以二维数学坐标说明源码的一维地址：
+
+```text
+装载：A[row,base+tx] → a_tile[ty][tx]
+      B[base+ty,col] → b_tile[ty][tx]
+
+计算：a_tile[ty][p] × b_tile[p][tx]
+    = A[row,base+p] × B[base+p,col]，p=0..15
+```
+
+例如第一个 block 的线程 (ty,tx)=(2,3) 一直负责 C[2,3]。base=0 时它搬 A[2,3] 和 B[2,3]；计算 p=5 时却读取 A[2,5] 和 B[5,3]，由线程 (2,5) 和 (5,3) 分别装载。<mark>线程负责搬的元素与计算所需的全部元素不同；合作装载后，每个线程读取自己需要的 shared 行列。</mark> 完整 tile 中，每个 A 元素供同一输出行的 16 个线程使用，每个 B 元素供同一输出列的 16 个线程使用。
+
+base=16 后，同一线程累加 A[2,16..31] 与 B[16..31,3] 的贡献。`sum` 是每线程私有变量，定义在外层循环之前，只初始化一次；16 轮的贡献累积保留，直到 K 全部处理完才写 C。shared 是每 block 的公用输入工作区，sum 是每线程自己的输出累加值。
+
+用户随后主动复述：一个 block 负责一个 tile，外层循环对应 A tile 向右、B tile 向下移动，每线程把当前行列片段的乘加加入 sum，最终得到整行与整列的点积。该主线正确；已进一步明确 block 负责的是固定的 C tile，以及每线程每轮只装载两个输入元素。
+
+**为什么每轮需要两次 barrier**
+
+装载后的 `__syncthreads()` 保证本 block 所有线程写完当前 shared，再允许其他线程读取；内层计算后的第二次 barrier 保证所有线程读完，才允许下一轮覆盖相同 buffer。两个 barrier 分别保护“写完再读”和“读完再覆盖”，不能因同一线程自身写读有序就省掉跨线程协调。
+
+尾部用例 M=37,N=53,K=29 同时覆盖三个维度不足整块的情况。A 独立判断 row 与 base+tx，B 独立判断 base+ty 与 col，越界位置填零；输出最后按 row/col 边界写出。输出越界的线程仍可能负责有效输入装载，且需要参加 barrier，不能在 tiled 开头照抄 naive 的提前 return。CPU 的 cudaDeviceSynchronize 等待 kernel 完成，也不能代替内部两次同步。
+
+**实验现象：正确、较快，但请求数与 DRAM 流量不同**
+
+<span style="color:red">用户提问：从实验现象看结果怎样？为什么 DRAM 读取量从 537728 字节变为 528000 字节？</span>
+
+本次总结只重读已有证据，未重新运行。正式源码 SHA-256 与 [正式补全日志](../reports/CH12/completed-2026-10-28.txt) 一致。该次环境为 GTX 1650 / CC 7.5 / 14 SM、NVCC 12.9.86、Compute Sanitizer 2025.2.1.0；主 shape 为 M=N=K=256、float32、block/grid 均 (16,16)。
+
+| 正式版结果 | naive | tiled |
+| --- | --- | --- |
+| 主 shape 的 65536 个输出 | PASS，最大绝对/相对误差 0 | PASS，最大绝对/相对误差 0 |
+| 尾部 shape 的 1961 个输出 | PASS，最大绝对/相对误差 0 | PASS，最大绝对/相对误差 0 |
+| 每 block 静态 shared 字节 | 0 | 2048 |
+| 普通 Event 中位数 μs/次 | 157.452798 | 107.673597 |
+
+正式版 memcheck（padding=32）、racecheck、synccheck 均零错误，racecheck 零 warnings；check、工具命令与 bench 均退出 0。输入是 /16 的小数，本例长度下结果可以精确表示，误差 0 不推广为任意 FP32 GEMM 的要求。普通计时为 warmup=10、samples=21、batch=5，naive/tiled 比值约 1.462，tiled 耗时降低约 31.6%；区间不含分配、H2D/D2H、CPU reference/校验，可能含 host 提交间隙，不等于端到端收益。
+
+以下访存指标来自此前临时补全版的独立 NCU 预检，不是正式补全版重新采集结果；原始表见 [CSV](../reports/CH12/preflight-metrics-2026-10-28.csv)，采集命令见 [预检日志](../reports/CH12/preflight-2026-10-28.txt)。
+
+| NCU 预检指标 | naive | tiled |
+| --- | --- | --- |
+| L1/TEX global load 请求数 | 1048576 | 65536 |
+| L1/TEX global load sectors | 2097152 | 261594 |
+| DRAM 读取字节 | 537728 | 528000 |
+
+请求数减少为 1/16、sector 约为 1/8，而 DRAM 读取接近。A 与 B 各 262144 字节，合计 524288 字节（512 KiB）；报告中 L2 容量为 1048576 字节（1 MiB）。输入规模为缓存复用提供条件：naive 的重复 global 请求也可能由缓存满足，不必每次回到 DRAM。<mark>global load 请求与 DRAM 实际读取处在不同层次；两种 DRAM 读数都接近一份 A+B，与缓存减少重复显存读取的解释一致。</mark> 容量足够本身不是命中率证明，也不能反推出所有具体访问都只读取一次。
+
+两次 DRAM 读数相差 9728 字节，约为 naive 读数的 1.8%。现有数据未拆分这段差额，也没有重复采集来确认稳定性，不能认定某段代码精确、省下且稳定地产生这 9728 字节收益。CSV 的 Kbyte 为十进制，例如 537.728 Kbyte=537728 字节；A/B 大小的 KiB 则按 1024 换算。
+
+NCU 的设备内存字节描述 L2 与 DRAM 间的数据传输；默认在 replay 前清缓存，kernel 执行期间仍可正常填充并命中缓存。此次各 kernel 3 passes，缓存控制没有关闭 kernel 内的缓存；该状态也不等于普通预热 Event 的状态。语义参考 [NCU：Device Memory](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#device-memory) 与 [Cache Control](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#cache-control)。
+
+shared 显式复用减少重复 global 请求，但增加 shared 读写和同步；缓存、指令与资源差异也会影响性能。现有结果没有量化各因素对耗时的贡献，不能将约 1.46 倍加速全部归给 DRAM 流量，也不能由请求减少 16 倍推断加速 16 倍。数据只适用于本机、本输入与对应运行；普通计时与 profiler 分开，不把正式版与历史临时版跨运行作优化 A/B。
+
+### 踩坑记录
+
+用户实际困惑集中在参数用途、作用域枚举、base 沿哪个维度移动，以及线程装载的两个数如何参与行列片段计算。随后分块累加主线已被正确复述；两次 barrier、尾部线程参与和缓存层次已讲解，但没有完整独立复述或个人操作的证据。不把提问编造成实现错误，也不把 Codex 补全记成用户独立写出。
+
+最初骨架 tiled 输出为零，数值 FAIL 且拒绝计时，属于练习未完成；当前正式代码已补全并验证。未见用户个人编译失败、Sanitizer 报错或 GUI 采集经历，不补写这些事件。DRAM 字节接近输入总量不代表所有 global 请求直接访问显存，也不代表 shared 优化没有收益；细小差额的来源和稳定性尚未验证。
+
+### 八股自测
+
+任选一个线程，指出它负责的 C[row,col]，说明 base=0 和 base=16 时分别装载哪两个输入、内层 p=5 时从哪些线程写入的 shared 位置取数，以及 sum 为什么能保留所有轮次贡献。再解释两个 barrier 分别保护什么，为什么输出越界的线程仍可能需要装载和同步。
+
+结合本次 157.45/107.67 μs、请求减少 16 倍和 DRAM 约 0.53 MB 的结果，说明 shared 复用发生在哪里、naive 为什么也能利用缓存，以及普通 Event 和 NCU 分别测了什么。以上用于后续独立回答，不额外扩展为 cuBLAS、Roofline、Tensor Core 或多层 GEMM 调优。

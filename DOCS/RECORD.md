@@ -22,7 +22,7 @@
 | 09 bank conflict | RUNNING | 45～60min | — | 未评估 | Codex 骨架、按要求补全地址练习及源码/指标讲解 | 正式校验、三种 Sanitizer、Event 与 NCU 通过；线程组织、转置、bank 分批与 1,015,808 计数已讲解并总结，个人运行和独立解释待验收 |
 | 10 归约 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、两处 TODO 补全、验证及源码/实验讲解 | 正式逐片/总和、三种 Sanitizer 与 Event 通过；用户已复述 shuffle 仍为树形归约，属性、mask、跨 warp 交接已讲解并总结，个人运行及完整独立解释待验收 |
 | 11 SM 与 occupancy | RUNNING | 45～60min | — | 未评估 | Codex 骨架、两处 TODO 补全、验证及讲解总结 | 正式资源/数值、三种 Sanitizer、Event 与 API/NCU 通过；预留 0/16/32 KiB、理论驻留 4/3/1 blocks/SM；shared 来源、容量推导及 NCU 平均值已讲解总结，个人操作与独立解释待验收 |
-| 12 数据复用 | TODO | 45～60min | — | 未评估 | 未开始 | — |
+| 12 数据复用 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、两处 TODO 补全、验证及讲解总结 | 正式版两种 shape 全量校验、三种 Sanitizer 与 Event 通过；历史 NCU 对照保留；用户已正确复述固定输出与沿 K 分块累加，个人运行及同步/尾部/缓存边界的完整独立解释待验收 |
 | 13 Host 异步 | TODO | 45～60min | — | 未评估 | 未开始 | — |
 | 14 Stream | TODO | 45～60min | — | 未评估 | 未开始 | — |
 | 15 Event 与重叠 | TODO | 45～60min | — | 未评估 | 未开始 | — |
@@ -501,3 +501,35 @@ Ch11 记 RUNNING，仅表示骨架和教学预检已开展，不计用户完成�
 重读正式源码、completed 日志和原始 NCU CSV，核对 SHA-256 及三组动态预留 0/16384/32768 字节、静态 32 字节、理论 occupancy 100%/75%/25%、平均 active warp 23.570222/16.451688/6.217337 和实测 73.656944%/51.411524%/19.429179%。既有片段和校验均 PASS、误差 0、总和 -184，三种 Sanitizer 零错误、racecheck 零 warnings；普通 Event 中位数为 29.926401/30.604801/45.705599 μs。明确 shared/L1 配置随预留变化、耗时不可全部归因于 occupancy；warp 0 后段合并等只作机制解释，未量化实际贡献，不将教学平均值例子当逐周期实测。
 
 本次只更新 NOTE 与 RECORD，并核对源码哈希、日志/CSV 数值、文档链接与 diff 格式；没有重新编译、运行 GPU、计时、采集 profiler 或操作 GUI，无新增临时产物。Ch11 保持 RUNNING，两处实现与验证均由 Codex 完成，个人操作及完整独立解释仍待验收，不记 DONE。实际学习与工程执行耗时未记录。无计划范围偏离、新依赖或新增课程门槛，无需额外 Claude 审阅，未启动 Claude、未提交或推送，保留已有工作区改动。
+
+## 2026-10-28：Ch12 数据复用内容生成及预检
+
+用户明确要求“生成CH12内容”。按 PLAN 阶段 B 新增 [CH12/tiled_gemm.cu](../CH12/tiled_gemm.cu) 与 [数据复用讲义](chapters/12_data_reuse.md)，更新 PLAN 目录/准备依据及 NOTE 预习入口。一个实验比较 naive 与单层 shared tiled FP32 GEMM，固定主 shape M=N=K=256、block=(16,16)、grid=(16,16)，每线程计算一个输出；A/B/C 各 256 KiB。复用已有错误检查、全量校验与 Event 模式，正式源码保留 shared 装载和乘加两处 TODO，两次 barrier 和尾部填零框架由 Codex 提供。额外 M=37,N=53,K=29 仅用于非整除边界校验，不是第二个性能变量。
+
+现场复核 GTX 1650 / CC 7.5 / 14 SM / warpSize=32 / 4096 MiB、驱动 610.88，NVCC 12.9.86、NCU/Compute Sanitizer 2025.2.1.0，核对 CUDA 12.9 官方矩阵乘法/shared 示例及 NCU 指标口径。正式骨架与只替换 TODO 占位的临时补全版编译均无警告、无 spill；naive 每线程 53 个寄存器、0 shared，tiled 骨架 31 个寄存器、补全版 39 个，两版 tiled 静态 shared 均为 2048 字节。正式骨架 naive 两种 shape 均 PASS，tiled 主 shape 65536 项和尾部 1961 项均 FAIL、最大绝对误差分别 3.4921875/1.3125，check/bench 预期退出 1、bench 拒绝计时。临时补全版四组全量校验 PASS，最大绝对/相对误差均 0、check/bench 退出 0；混合容差 atol=rtol=1e-4，NaN/Inf 拒绝，CPU double reference 独立生成。
+
+两版均运行 memcheck（padding=32）、racecheck、synccheck：均零工具错误，racecheck 零 warnings。骨架继承目标程序退出 1，不能把 Target application returned an error 当成 Sanitizer 发现错误；补全版工具命令均退出 0。独立普通 bench 在正确性通过后仅测主 shape，每法 warmup=10、samples=21、batch=5，naive/tiled Event 批次平均每次启动中位数为 155.961597/106.156802 μs，比值 1.469163。计时不含分配、传输、CPU reference/校验，可能含 host 提交间隙；不与历史/其他 shape 作优化 A/B，不泛化固定收益。
+
+NCU 仅采临时补全版 check 最前面的主 shape 两次 launch，每 kernel 3 passes；global load 请求数为 1048576/65536（naive/tiled），L1/TEX sectors 为 2097152/261594，DRAM 读取 537728/528000 字节。请求减少 16 倍而 DRAM 字节接近，不能把源码读取、合并/缓存后的请求与显存流量混用，也不将加速全部归因于某个因素。NCU 理论 occupancy 均 100%，achieved 为 91.85%/92.86%；NCU 分配后的寄存器为 56/40，与编译报告分别记录。NCU 使用默认 replay/缓存控制，不代表普通预热计时的缓存状态；本章 NCU 为可选观察，不增加必修门槛。
+
+原始命令、两版源码 SHA-256、补全差异、输出及退出码见 [预检日志](../reports/CH12/preflight-2026-10-28.txt)，报告为 [NCU](../reports/CH12/preflight-2026-10-28.ncu-rep)，原始指标为 [CSV](../reports/CH12/preflight-metrics-2026-10-28.csv)。临时补全源码及二进制已清理，正式 build 对应保留两处 TODO 的骨架；正式证据保留。NSYS、GUI、SASS 均 NOT RUN，无新增依赖。
+
+Ch12 记 RUNNING，仅表示骨架与教学预检已开展；用户完成部分尚无证据，两处实现、个人运行、关于输出/装载坐标、shared 复用、两次 barrier、尾部参与和计时边界的独立解释仍待验收。前章状态保留。计划学习 45～60 分钟，实际学习与工程准备/agent 执行耗时未记录；NOTE 仅新增预习入口，不编造用户疑问或掌握。无计划范围偏离，不引入 cuBLAS、Roofline、Tensor Core、多层 tiling 或框架依赖；无需额外 Claude 审阅，未启动 Claude，未提交或推送。
+
+## 2026-10-28：Ch12 TODO(1)/(2) 正式补全与验证
+
+按用户“完成todo1和todo2”的要求，正式补全 [gemm_tiled](../CH12/tiled_gemm.cu)：线程按 A 的 (row,base+tx) 和 B 的 (base+ty,col) 装载到 shared，分别判断两维边界、越界填零；内层逐项累加 a_tile[ty][p]*b_tile[p][tx]。保留两次 block barrier 和最终带边界写出，移除零占位、unused 参数处理及过时提示。更新章节当前状态、NOTE 与 PLAN 目录说明，历史骨架预检及 NCU 证据保留并明确为补全前结果；未改变 naive、shape、输入、block/grid、容差或计时方式。
+
+现场复核 GTX 1650 / CC 7.5 / 14 SM / 4096 MiB、驱动 610.88，NVCC 12.9.86、Compute Sanitizer 2025.2.1.0。正式重编译无警告、无 spill，naive/tiled 每线程寄存器为 53/39，静态 shared 为 0/2048 字节。M=N=K=256 的 65536 项和 M=37,N=53,K=29 的 1961 项，两种方法均全量 PASS、最大绝对/相对误差均 0；memcheck（padding=32）、racecheck、synccheck 均零错误，racecheck 零 warnings。check、工具命令和 bench 全部退出 0。
+
+普通 Event 与 Sanitizer 分开运行；主 shape、float32、block/grid 均 (16,16)，warmup=10、samples=21、batch=5，naive/tiled 中位数为 157.452798/107.673597 μs/次，比值 1.462316。计时不含分配、H2D/D2H、CPU reference/校验，可能含 host 提交间隙；只用于本轮比较，不与历史预检作优化 A/B，不泛化固定收益。本轮 NCU、NSYS、GUI、SASS 均 NOT RUN；历史临时版 NCU 不冒充正式版重新采集结果。原始命令、正式源码 SHA-256、编译资源、结果及退出码见 [正式补全日志](../reports/CH12/completed-2026-10-28.txt)。
+
+两处实现与验证均由 Codex 完成，用户个人运行及对装载/计算坐标、shared 复用、两次 barrier、尾部参与与计时边界的独立解释仍待验收，Ch12 保持 RUNNING，不记 DONE。计划学习 45～60 分钟，实际学习与工程执行耗时未记录。无新增依赖、临时补全文件或计划范围偏离，无需额外 Claude 审阅，未启动 Claude、未提交或推送，保留既有工作区改动。
+
+## 2026-10-28：Ch12 本章总结
+
+按用户“总结本章内容”的要求，整合 NOTE 的 Ch12 阅读入口并新增完整复盘，沿用“今日完成任务、基本概念、踩坑记录、八股自测”格式。覆盖六个实验常量、作用域枚举/名称函数语法、naive 与 tiled 数据流、固定 C 输出 tile、base 沿 K 移动、协作装载与每线程 sum、两次 barrier 和尾部参与、正式数值/计时与历史 NCU 的证据边界，以及 global 请求、缓存和 DRAM 流量的区别。以红色问题标签保留用户实际疑问，用 mark 标注关键理解；记录用户关于 A 向右、B 向下及片段累加的正确主动复述，不将辅助实现或已经讲解等同于独立掌握。
+
+重读正式源码、completed 日志和历史 NCU CSV，核对正式源码 SHA-256 一致。已有正式主 shape 65536 项与尾部 1961 项，两种算法均 PASS、最大绝对/相对误差 0；三种 Sanitizer 零错误、racecheck 零 warnings。正式普通 Event 为 naive/tiled 157.452798/107.673597 μs/次，warmup=10、samples=21、batch=5，比值约 1.462、耗时降低约 31.6%。历史临时版 NCU 请求数 1048576/65536、sectors 2097152/261594、DRAM 537728/528000 字节，L2 容量 1048576 字节；A+B 合计 524288 字节。说明缓存复用与两个 DRAM 读数接近相符，但既不能由容量证明全部命中，也不能将差额 9728 字节解释为确定且稳定的收益。计时、采集版本与指标层次分别记录，不量化未采集的因果贡献，不把 replay 前清缓存误读为 kernel 内禁用缓存。
+
+本次仅更新 NOTE 与 RECORD，核对日志数值、CSV 单位、源码哈希、文档链接和 diff 格式；未重新编译、运行 GPU、计时、采集 profiler 或操作 GUI，无新增临时文件。Ch12 保持 RUNNING，分块累加主线已有用户复述，个人运行及同步、边界、缓存/计时证据的完整独立解释仍待验收。两处实现与工程验证由 Codex 完成，实际学习与工程执行耗时未记录；无计划偏离、新依赖或新增课程门槛，无需额外 Claude 审阅，未启动 Claude、未提交或推送，保留既有工作区改动。
