@@ -14,6 +14,14 @@
 
 入口讲义保留原练习路线，本页末尾的 Ch10 总结整理实际提问、树形合并与跨 warp 交接。阅读重点是每轮谁写、下一轮谁读，以及为什么最后只有 8 个有效 warp 和时仍让完整 32 lanes 参与 shuffle。
 
+## Ch11 阅读入口（2026-10-27）
+
+[SM 与 occupancy 讲义](chapters/11_occupancy.md) 从“一个 SM 能同时放下多少个相同 block”开始。复用 Ch10 求和，只增加启动时每 block 额外预留的 shared 字节数；求和结果应相同，但有限 shared 可能限制驻留数量。occupancy 在这里是驻留 warp 占该 SM 最大 warp 数的比例，不是 GPU 利用率或加速比。
+
+阅读时先分清每 SM 的容量、每 block 的用量与全 GPU 的 grid，再看 host 上的 occupancy 查询和动态预留字节数。API 给出理论上限，NCU 核对实际配置与 achieved occupancy，普通 Event 单独看耗时。本页末尾的 Ch11 总结整理实际提问、shared 容量推导、实验现象与 NCU 平均值口径，不将已有讲解记为用户独立掌握。
+
+2026-10-28 用户先后要求 Codex 补全两处练习。`active_blocks_per_sm()` 根据 kernel、kBlock 和 dynamic_bytes 查询每 SM 理论驻留 block 数，输出写入 blocks；查询不会启动 kernel，也不改变实际预留量。随后 `launch()` 将 requested_bytes 作为第三个启动参数，为每个 block 实际预留相应的动态 shared；静态 32 字节仍另外计入。只完成查询的阶段，实际预留曾全部为 0；当前两处均完成，NCU 已核对三组动态预留量。两处实现和验证由 Codex 完成，个人独立解释待验收。
+
 ## 首轮贯穿的观察问题
 
 | 观察问题 | 将使用的程序证据 |
@@ -890,3 +898,107 @@ if (warp==0) 包含该 warp 的全部 32 个 lane，满足 full mask 的参与�
 不看答案，解释 shared 版 stride=64 时线程 0 为什么已合并四项，为什么 barrier 必须位于 if 外；再追踪 tid=32 写出的 warp 和如何交给 tid=1，说明最后仅 8 个有效和时为何仍由 32 lanes 参与 shuffle。
 
 用自己的话区分树形归约算法与 shared/shuffle 的通信方式，解释 `__forceinline__` 的作用，并指出本轮 Event 1.746 倍比较包含和排除了哪些工作。这些是后续验收问题，不把已有讲解或 Codex 验证当成用户已完整回答。
+
+
+## 2026-10-28 Ch11：SM、shared 资源与 occupancy
+
+### 今日完成任务
+
+围绕 [CH11/occupancy.cu](../CH11/occupancy.cu)，复用 Ch10 的 shuffle 求和，只改变每 block 额外预留的 dynamic shared 字节数。用户要求 Codex 先后补全 occupancy 查询和启动参数两处 TODO，随后追问查询函数、预留的含义、warp 数的来源、静态 shared 的来源、驻留限制，以及 NCU 实测 occupancy 的计算与小数。两处实现和正式程序/工具验证均由 Codex 完成，没有用户个人运行、GUI 操作或完整独立复述的证据。运行方法见 [章节讲义](chapters/11_occupancy.md)，数据见 [正式日志](../reports/CH11/completed-2026-10-28.txt) 与 [原始指标 CSV](../reports/CH11/completed-metrics-2026-10-28.csv)。
+
+### 基本概念
+
+**固定求和任务，只增加每 block 的资源占用**
+
+固定 N=262144、float32、grid=1024、block=256。每个 block 的 256 个线程处理连续 256 项，经 shuffle 和 shared 交接输出一个 partial；GPU 输出 1024 个片段和，由 CPU 逐片校验并汇总总和。对照的动态预留为 0/16384/32768 字节，额外空间故意不读写，kernel 的输入、算法、读写和线程组织不变。
+
+```text
+CPU 输入与 reference → H2D → 同一个 shuffle 求和 kernel → D2H → 逐片校验与 CPU 汇总
+                                     ↑
+                         每 block 额外预留 0 / 16 / 32 KiB
+```
+
+**查询容量与实际启动分别做什么**
+
+<span style="color:red">用户提问：讲解一下 active_blocks_per_sm 这段的作用。</span>
+
+```cpp
+int blocks = 0;
+CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+    &blocks, block_sum_shuffle, kBlock, dynamic_bytes));
+return blocks;
+```
+
+该 host 函数回答“假设使用这个 kernel、每 block 256 个线程和指定 dynamic shared，一个 SM 在资源约束下最多能同时容纳几个 block”。blocks 保存查询结果，&blocks 是输出地址；后面三个参数指定 kernel、线程数和每 block 动态字节数。API 本身返回错误状态，由 CUDA_CHECK 检查；helper 最后返回 blocks。kernel 的静态 shared 和寄存器属性参与计算，不需手动重复传入。[CUDA Runtime API 12.9：Occupancy](https://docs.nvidia.com/cuda/archive/12.9.0/cuda-runtime-api/group__CUDART__OCCUPANCY.html)
+
+实际启动在另一个 helper 中完成：`launch_bytes=requested_bytes`，再传给 `block_sum_shuffle<<<kBlocks,kBlock,launch_bytes>>>(input,partial)` 的第三个启动参数。<mark>occupancy API 只查询容量，第三个启动参数才让每个 block 实际预留动态 shared；两处必须使用相同字节数。</mark> 只完成查询的历史阶段，16/32 KiB 查询已有结果，但实际 launch 仍均为 0，因此资源实验不能算通过。
+
+**预留、静态 shared 与动态 shared 的来源**
+
+<span style="color:red">用户提问：这里预留什么意思？只要有 block 就有 32 字节静态 shared 吗？这是 CUDA C 还是 Turing 规定的？</span>
+
+预留表示 block 驻留时占用一份 shared 空间，执行期间供本 block 使用；即使没有读写，空间也占资源。block 结束后资源可供后续 block 使用。本例第三个启动参数是每 block 的额外字节数，不是全 GPU 的一次总分配，也不表示提前拷入了数据。
+
+32 字节来自我们写的 `__shared__ float warp_partial[kWarps]`：kWarps=8，每个 float 为 4 字节，因此数组大小是 8×4=32。每个 block 都有自己的一份，保存它的 8 个 warp 和。<mark>32 字节是本 kernel 的静态 shared 用量，不是所有 block 的固定开销。</mark> CUDA C++ 提供按 block 独立的 shared 变量语义，数组大小由代码决定；Turing 规定硬件资源容量。其他 kernel 的静态 shared 可以为 0 或其他大小；本例编译和 Runtime 属性均确认 32 字节。
+
+**为什么每 block 有 8 个 warp，每 SM 最多 32 个 warp**
+
+<span style="color:red">用户提问：为什么每 block 有 8 个 warp，每 SM 最多 32 个 warp？</span>
+
+本机 warpSize=32。每 block 的线程数由代码设为 256，因此 256/32=8 个 warp；线程 0..31 为 warp 0，32..63 为 warp 1，依次到 224..255 为 warp 7。若将 block 改成 128 线程，则为 4 个 warp，但本章保持 256 不变。
+
+SM 是执行线程组的处理单元。本机 GTX 1650 / CC 7.5 每 SM 最多驻留 1024 线程，即 32 个 warp，这是硬件容量；整张卡有 14 个 SM，不能把全 GPU 的 grid 数量当成单个 SM 的驻留数量。驻留表示线程组已进入 SM 并占用资源，指令仍需调度，不保证所有 warp 同时发射。Turing 的 32 warp/SM 上限不能套用到所有架构。[CUDA 12.9：Turing Occupancy](https://docs.nvidia.com/cuda/archive/12.9.0/turing-tuning-guide/index.html#occupancy)
+
+**为什么预留 16 KiB 后只能驻留 3 个 block**
+
+<span style="color:red">用户提问：就因为给一个 block 预留了 16 KB，所以只允许同时驻留 3 个 block 吗？</span>
+
+本例额外预留 16 KiB 后，每 block 还需加静态 32 字节。SM 的 shared 最大容量为 65536 字节；4×(16384+32)=65664，超过容量，3×(16384+32)=49248，才放得下。额外预留 32 KiB 时，2×(32768+32)=65600，也超限，因此只能放 1 个。额外预留为 0 时，shared 很小，但每 SM 的线程/warp 容量只允许 1024/256=4 个此类 block。
+
+<mark>驻留上限必须同时满足线程、寄存器、shared 和 block 数等限制，最紧的资源约束决定结果。</mark> 上述字节加法是理解本例的容量推导；实际还涉及分配粒度和 shared/L1 配置，以 API/NCU 核对。不是“16 KiB 对应 3 个 block”的通用规则；若某 kernel 的 shared 总量恰好为 16 KiB，单看 64 KiB 容量可放 4 个，还需检查其余资源。
+
+本例每 block 有 8 个 warp，理论 occupancy=理论驻留 block/SM×8/32，因此 4/3/1 个 block 对应 100%/75%/25%。它表示资源允许的上限，不等于实际 GPU 利用率或性能比例。
+
+**正式实验现象与计时边界**
+
+<span style="color:red">用户提问：给我具体的实验现象，并说明原理。</span>
+
+以下重读 2026-10-28 正式证据，源码 SHA-256 与日志一致；本次总结没有重新编译、运行或采集。环境为 GTX 1650 / CC 7.5 / 14 SM、NVCC 12.9.86、NCU/Compute Sanitizer 2025.2.1.0，shape/dtype 与上文一致。
+
+| 动态预留字节/block | API 驻留 block/SM | API / NCU 理论 occupancy | NCU 平均 active warp/SM | NCU achieved occupancy | 普通 Event 中位数 μs/次 |
+| --- | --- | --- | --- | --- | --- |
+| 0 | 4 | 100% / 100% | 23.570222 | 73.656944% | 29.926401 |
+| 16384 | 3 | 75% / 75% | 16.451688 | 51.411524% | 30.604801 |
+| 32768 | 1 | 25% / 25% | 6.217337 | 19.429179% | 45.705599 |
+
+三组实际动态预留经 NCU 核对，静态 shared 均为 32 字节；每组 1024 个片段和 PASS、最大误差 0，CPU 汇总总和均为 -184。输入为可精确表示的小整数，计算不变，因此结果一致；不推广为一般浮点归约均须精确相等。memcheck（padding=32）、racecheck、synccheck 均零错误，racecheck 零 warnings；check、工具检查与 bench 均退出 0。
+
+Event 先全量校验，再各预热 10 次、21 个样本，每样本批量启动 10 次并归一化到每次启动后取中位数；区间不含分配、传输、CPU reference/校验与汇总，可能含 host 提交间隙。Sanitizer、NCU 和普通计时分开运行，本次没有新做 NSYS、GUI 或 SASS 检查。
+
+本轮 0/16 KiB 的耗时相近，32 KiB 比 0 KiB 约长 53%，没有因为理论 occupancy 降到四分之一就慢四倍。机制上，当一个 warp 等待数据时，更多驻留 warp 能提供更多就绪候选供调度，可能帮助利用等待时间；是否更快仍取决于访存、依赖与指令执行等因素。本报告还显示 shared 配置大小为 32768/65536/65536 字节，可能改变 L1 资源。<mark>资源对驻留上限的限制已由 API/NCU 证实；现有指标不能把全部耗时差归因于延迟隐藏或 occupancy。</mark> 不与历史临时版跨运行作优化 A/B，不推断固定加速比。
+
+**NCU 实测 occupancy 怎样计算，为什么有小数**
+
+<span style="color:red">用户提问：为什么实测 occupancy 低于理论值？NCU 的 occupancy 怎么计算，为什么会有那样的小数？</span>
+
+本机 NCU 2025.2.1 的 Occupancy.section 将 Theoretical Occupancy 映射到 `sm__maximum_warps_per_active_cycle_pct`，将 Achieved Occupancy 映射到 `sm__warps_active.avg.pct_of_peak_sustained_active`，将 Achieved Active Warps Per SM 映射到 `sm__warps_active.avg.per_cycle_active`。硬件计数累计 active warp，按 SM 活跃周期归一化并跨 SM 聚合，再换算为最大容量百分比；不是用 CPU 提交到同步结束的整段时间，也不是每条指令参与线程数或发射率。[NCU：Metrics Entities](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#metrics-entities)
+
+对本机报告可直接核对：achieved occupancy=平均 active warp/SM÷32×100%。例如 23.570222/32×100%≈73.656944%。`.avg` 对应跨 SM 实例平均，`.per_cycle_active` 对应每个单元活跃周期归一化，`.pct_of_peak_sustained_active` 再表达为活跃周期口径的峰值百分比，不把 active 与 elapsed 周期混用。
+
+每一时刻的 warp 数是整数，但不同周期和 SM 的数量可不同，所以平均值有小数。仅作教学示意：一个 SM 有 80 个活跃周期驻留 8 个 warp，另 20 个周期驻留 1 个，则平均为 (80×8+20×1)/100=6.6 个，对应 6.6/32×100%=20.625%。这不是本次原始逐周期轨迹，不把示例数字当实测。
+
+理论上限不保证一直填满。block 进入/完成、补入后续 block、grid 收尾和 warp 结束时机都会影响平均驻留数量；本 kernel 在 shared 交接后只有 warp 0 继续合并并写出，其他 warp 可以先结束，而 block 的 shared 资源尚未释放。这是源码可解释的降低平均 active warp 数的机制，但现有报告未量化各因素贡献，不能直接认定它是主要原因。
+
+<mark>等待内存或 barrier 的 warp，只要仍在驻留且尚未结束，仍可计入 active warp；没有发射指令不等于 occupancy 下降。</mark> 需要立即可执行的 warp 数与发射情况时，应看另外的就绪/调度指标，本章不追加完整 stall 分析作为首轮门槛。
+
+### 踩坑记录
+
+用户真实疑问集中在“预留是否使用空间”“32 字节是不是架构固定开销”“8 warp/block 与 32 warp/SM 分别由谁决定”“只预留就能限制 block 数吗”和“百分比为什么不是整数档位”。已结合数组、启动参数、容量加法和平均值解释，不把提问本身写成错误实现或独立掌握。
+
+只补 TODO(1) 的阶段，求和可全部正确，但实际动态预留仍为 0，整个资源实验退出 1；这是练习未完成，不是 Sanitizer 检出错误。两处均补全后实际资源与查询一致，程序退出 0。未见用户编译失败、个人 NCU/GUI 操作或完整独立复述的证据，不编造这些经历。更多平均值小数位不代表更高的实验稳定性，耗时与架构结论也不能跨机器直接泛化。
+
+### 八股自测
+
+不看答案，指出查询函数的四个参数与第三个 launch 参数分别做什么，说明静态 32 字节来自哪行代码；用 256 线程、warpSize=32 和每 SM 的资源上限，推导三种预留量为什么得到 4/3/1 个 block 和 100%/75%/25% 理论 occupancy。
+
+再解释 NCU 的 23.570222 个平均 warp 如何对应 73.656944%，为什么平均值可以有小数、等待内存的 warp 仍可能计入 active，以及本次 occupancy 降到四分之一为什么不意味着耗时变成四倍。以上是待独立回答的验收问题，不将已讲解或 Codex 验证计为用户已掌握。

@@ -21,7 +21,7 @@
 | 08 shared 与同步 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、讲解及按要求补全两处练习 | 正式校验、三种 Sanitizer 与 Event 通过；用户已复述对称读取，读写依赖及两类同步已讲解，个人运行和独立解释待验收 |
 | 09 bank conflict | RUNNING | 45～60min | — | 未评估 | Codex 骨架、按要求补全地址练习及源码/指标讲解 | 正式校验、三种 Sanitizer、Event 与 NCU 通过；线程组织、转置、bank 分批与 1,015,808 计数已讲解并总结，个人运行和独立解释待验收 |
 | 10 归约 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、两处 TODO 补全、验证及源码/实验讲解 | 正式逐片/总和、三种 Sanitizer 与 Event 通过；用户已复述 shuffle 仍为树形归约，属性、mask、跨 warp 交接已讲解并总结，个人运行及完整独立解释待验收 |
-| 11 SM 与 occupancy | TODO | 45～60min | — | 未评估 | 未开始 | — |
+| 11 SM 与 occupancy | RUNNING | 45～60min | — | 未评估 | Codex 骨架、两处 TODO 补全、验证及讲解总结 | 正式资源/数值、三种 Sanitizer、Event 与 API/NCU 通过；预留 0/16/32 KiB、理论驻留 4/3/1 blocks/SM；shared 来源、容量推导及 NCU 平均值已讲解总结，个人操作与独立解释待验收 |
 | 12 数据复用 | TODO | 45～60min | — | 未评估 | 未开始 | — |
 | 13 Host 异步 | TODO | 45～60min | — | 未评估 | 未开始 | — |
 | 14 Stream | TODO | 45～60min | — | 未评估 | 未开始 | — |
@@ -459,3 +459,45 @@ Ch10 更新为 RUNNING，两处实现和验证均由 Codex 按用户要求完成
 重读正式源码、章节讲义及当日 completed 日志：两方法各 1024 个 partial PASS、最大误差 0、总和 -184、第一片 -189；三种 Sanitizer 零错误、racecheck 零 warnings。静态 shared=1024/32 字节每 block，源码 barrier 次数=9/1，普通 Event 中位数=29.046401/16.640000 μs，本轮比值 1.746（warmup=10、samples=21、batch=10）。明确源码计数与硬件动态指标、工具与普通计时、本轮结果与历史预检的边界，不把收益全部归因于单个因素或泛化到其他设备输入。
 
 本次仅更新 NOTE 与 RECORD，并核对源码 SHA-256、日志数值、文档链接与 diff 格式；没有重新编译、运行 GPU、计时或采集 profiler，无新临时产物。Ch10 保持 RUNNING，用户已有树形归约与通信差别的局部复述，个人运行及对 shared 轮间依赖、完整 warp 参与和跨 warp 数据流的完整独立解释仍待验收，不记 DONE。实际学习及工程执行耗时未记录。无计划偏离、新依赖或新增课程门槛，无需额外 Claude 审阅，未启动 Claude、未提交或推送，既有工作区改动保留。
+
+
+## 2026-10-27：Ch11 SM 与 occupancy 内容生成及预检
+
+用户明确要求“生成CH11内容”。按 PLAN 阶段 B 新增 [CH11/occupancy.cu](../CH11/occupancy.cu) 与 [章节讲义](chapters/11_occupancy.md)，更新 PLAN 目录/准备依据和 NOTE 预习入口。复用 Ch10 已实现的 shuffle 求和及校验、Event 骨架，固定 N=262144、float32、grid=1024、block=256、输入 1 MiB、输出 4 KiB；唯一主动改变的变量是每 block 额外预留 0/16384/32768 字节 dynamic shared。额外空间不访问，静态 shared 均为 32 字节。正式源码保留 occupancy API 查询和 launch 动态字节数两处关键 TODO；不调寄存器、block 或 kernel 算法。
+
+现场复核 GTX 1650 / CC 7.5 / 14 SM / warpSize=32 / 4096 MiB、驱动 610.88，NVCC 12.9.86、NCU/Compute Sanitizer 2025.2.1.0。核对本机 cuda_runtime.h 和 CUDA 12.9 官方 API 参数。正式骨架与只补两处 TODO 的临时版均编译无警告，编译/Runtime 属性为每线程 14 个寄存器、32 字节静态 shared、无 spill。骨架三组全部 1024 个 partial 均数值 PASS、误差 0、总和 -184，但查询未完成、实际预留均为 0，资源配置 INCOMPLETE，check/bench 预期退出 1，bench 拒绝计时。临时补全版三组逐片及总和均 PASS、误差 0，API 返回每 SM 驻留 4/3/1 个 block、理论 occupancy 100%/75%/25%，check/bench 退出 0。
+
+正式骨架和临时版各经 memcheck（padding=32）、racecheck、synccheck，均零工具错误，racecheck 零 warnings；骨架因练习未完成继承退出 1，Target application returned an error 不能解释为 Sanitizer 错误，补全版均退出 0。NCU 仅采临时版 check 的三次 launch，LaunchStats 确认动态预留为 0/16384/32768 字节、静态 32 字节；理论 occupancy 与 API 一致，achieved occupancy 分别为 73.49%/51.84%/19.42%，shared 限制 block 数为 128/3/1、warp 限制均为 4。NCU 中 shared 配置从 32768 变为 65536 字节，不能假设缓存配置也固定；NCU 分配后的每线程寄存器报告为 16，与编译报告分开记录，不据此新增调参任务。
+
+独立普通 bench 为 warmup=10、samples=21、batch=10，三组 Event 批次平均每次启动中位数分别为 31.251201/33.695999/75.939202 μs。区间不含分配、传输、CPU reference/校验及汇总，可能含 host 提交间隙；不与 profiler/前章或历史运行作性能 A/B，不将耗时全部归因于 occupancy 或推广为固定性能比例。原始命令、两份源码 SHA-256、临时补全差异、退出码及工具/资源表见 [预检日志](../reports/CH11/preflight-2026-10-27.txt)，报告为 [NCU](../reports/CH11/preflight-2026-10-27.ncu-rep)，原始指标为 [CSV](../reports/CH11/preflight-metrics-2026-10-27.csv)。临时补全源码及二进制已清理，正式 build 对应两处 TODO 骨架。NSYS、GUI、SASS 均 NOT RUN，无新增依赖。
+
+Ch11 记 RUNNING，仅表示骨架和教学预检已开展，不计用户完成或掌握；两处 TODO、个人运行及关于 static/dynamic shared、驻留容量、理论/实际 occupancy 与计时边界的独立解释待验收。NOTE 只添加预习入口，不编造用户问题或学习结果；前章待验收保留。计划学习 45～60 分钟，实际学习与工程准备/agent 执行耗时未记录。无计划范围偏离，无需额外 Claude 审阅，未启动 Claude、未提交或推送。下一步先读讲义预测，再补查询与 launch 两处 TODO，重新编译并做三组对照。
+
+
+## 2026-10-28：Ch11 occupancy 查询 TODO(1) 补全
+
+用户明确要求“完成TODO1”。Codex 在 CH11/occupancy.cu 的 active_blocks_per_sm 中加入 CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks, block_sum_shuffle, kBlock, dynamic_bytes))，移除未完成标记和过时提示；保留 TODO(2) 与实际 launch 预留 0 字节。更新 PLAN 目录说明、讲义当前行为和 NOTE 的查询/启动区别，保留原预检记录及既有工作区修改。属于 PLAN 阶段 B 的已授权练习补全，无范围偏离。
+
+现场复核 GTX 1650 / CC 7.5 / 14 SM / 4096 MiB、驱动 610.88，NVCC 12.9.86、Compute Sanitizer 2025.2.1.0；API 参数按本机 cuda_runtime.h 核对。正式重编译无警告，固定 N=262144、float32、grid=1024、block=256；查询目标动态预留 0/16384/32768 字节分别返回每 SM 4/3/1 个 block、理论 occupancy 100%/75%/25%。三组全部 1024 个 partial PASS、误差 0、总和 -184；实际预留均为 0，只有 0 字节配置通过，另外两组 INCOMPLETE，check 预期退出 1。三种 Sanitizer 均零工具错误，racecheck 零 warnings；其退出 1 继承练习未完成，不是工具错误。
+
+命令、正式源码 SHA-256、原始输出和退出码见 [query-completed-2026-10-28.txt](../reports/CH11/query-completed-2026-10-28.txt)。本轮 bench、NCU、NSYS、GUI 均 NOT RUN，未创建临时源码或二进制，无新增依赖。Ch11 保持 RUNNING，TODO(1) 实现及验证由 Codex 完成；TODO(2)、个人操作及完整独立解释待验收。计划学习 45～60 分钟，实际学习与工程执行耗时未记录。无需额外 Claude 审阅，未启动 Claude、未提交或推送。
+
+
+## 2026-10-28：Ch11 dynamic shared 启动 TODO(2) 补全与正式验证
+
+用户明确要求“完成TODO2”。Codex 将 CH11/occupancy.cu 的 launch_bytes 设为 requested_bytes，通过 kernel 第三个启动参数为每 block 预留请求的动态 shared；移除 TODO(2)、无用占位和过时程序提示，添加静态/动态资源分别计入的中文说明。kernel 算法、输入、grid/block 与 occupancy 查询不变。同步更新 PLAN 目录、NOTE 查询/启动说明及讲义当前行为，保留前期骨架和仅补 TODO(1) 的历史记录及既有工作区改动。属于 PLAN 阶段 B 已授权范围，无偏离。
+
+现场复核 GTX 1650 / CC 7.5 / 14 SM / 4096 MiB、驱动 610.88，NVCC 12.9.86、NCU/Compute Sanitizer 2025.2.1.0。固定 N=262144、float32、grid=1024、block=256，正式编译无警告，编译资源每线程 14 个寄存器、32 字节静态 shared、无 spill。三组实际 launch 动态预留为 0/16384/32768 字节、配置均 PASS；API 返回每 SM 4/3/1 个 block、理论 occupancy 100%/75%/25%。每组 1024 个 partial 全部 PASS、误差 0、总和 -184；memcheck（padding=32）、racecheck、synccheck 均零错误，racecheck 零 warnings，check/工具检查/bench 均退出 0。
+
+独立普通 Event bench 为 warmup=10、samples=21、batch=10，三组归一化到每次启动的批次中位数为 29.926401/30.604801/45.705599 μs。区间不含分配、传输、CPU reference/校验与汇总，可能含 host 提交间隙。NCU 单独采正式 check 的三次 launch，确认实际动态 shared 和静态 32 字节；理论 occupancy 与 API 一致，achieved occupancy 为 73.66%/51.41%/19.43%。shared 配置大小为 32768/65536/65536 字节，不假设缓存资源也恒定、不将时间差全部归因于 occupancy，不与历史结果作优化 A/B 或泛化固定性能比例。
+
+命令、正式源码 SHA-256、原始输出、退出码和指标摘要见 [completed-2026-10-28.txt](../reports/CH11/completed-2026-10-28.txt)，报告为 [NCU](../reports/CH11/completed-2026-10-28.ncu-rep)，原始指标为 [CSV](../reports/CH11/completed-metrics-2026-10-28.csv)。本轮 NSYS、GUI、SASS 均 NOT RUN，无临时补全源码或二进制、无新增依赖。Ch11 保持 RUNNING，两处实现及验证均由 Codex 完成，个人操作及对 SM 驻留、静态/动态 shared、理论/实际 occupancy 与计时边界的独立解释待验收。计划学习 45～60 分钟，实际学习与工程执行耗时未记录。无需额外 Claude 审阅，未启动 Claude、未提交或推送。
+
+
+## 2026-10-28：Ch11 本章总结
+
+按用户“总结本章内容”的要求，在 NOTE 新增 Ch11 汇总，沿用“今日完成任务、基本概念、踩坑记录、八股自测”格式，覆盖 occupancy 查询的输入/输出及错误状态、第三个启动参数与动态预留、静态 32 字节数组的来源、8 warp/block 和本机 32 warp/SM 的区别、资源共同约束下 4/3/1 blocks/SM 的容量推导、正式实验现象与计时边界，以及 NCU 理论/实际 occupancy、活跃周期、跨 SM 聚合和平均值小数。用红色问题标签保留用户真实提问、mark 标记核心结论；不编造用户独立实现、GUI 操作或完整复述。
+
+重读正式源码、completed 日志和原始 NCU CSV，核对 SHA-256 及三组动态预留 0/16384/32768 字节、静态 32 字节、理论 occupancy 100%/75%/25%、平均 active warp 23.570222/16.451688/6.217337 和实测 73.656944%/51.411524%/19.429179%。既有片段和校验均 PASS、误差 0、总和 -184，三种 Sanitizer 零错误、racecheck 零 warnings；普通 Event 中位数为 29.926401/30.604801/45.705599 μs。明确 shared/L1 配置随预留变化、耗时不可全部归因于 occupancy；warp 0 后段合并等只作机制解释，未量化实际贡献，不将教学平均值例子当逐周期实测。
+
+本次只更新 NOTE 与 RECORD，并核对源码哈希、日志/CSV 数值、文档链接与 diff 格式；没有重新编译、运行 GPU、计时、采集 profiler 或操作 GUI，无新增临时产物。Ch11 保持 RUNNING，两处实现与验证均由 Codex 完成，个人操作及完整独立解释仍待验收，不记 DONE。实际学习与工程执行耗时未记录。无计划范围偏离、新依赖或新增课程门槛，无需额外 Claude 审阅，未启动 Claude、未提交或推送，保留已有工作区改动。
