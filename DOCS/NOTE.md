@@ -28,6 +28,12 @@
 
 源码最初保留装载与累加两处练习，2026-10-28 已按用户要求由 Codex 补全：各线程按 A 的 (row,base+tx) 与 B 的 (base+ty,col) 装载，越界填零，再用 a_tile[ty][p] 与 b_tile[p][tx] 逐项乘加。host 提供 naive 对照、CPU double reference、尾部边界校验和 Event 骨架。减少源码 global 读取不等于 DRAM 流量或耗时同比下降；本章先用正确性和实测观察复用，不扩展完整 GEMM 优化体系。本页末尾的 Ch12 总结整理参数、语法、分块累加的实际复述及访存疑问，不将讲解或 Codex 验证直接记为独立掌握。
 
+## Ch13 阅读入口（2026-10-28）
+
+[Host 异步讲义](chapters/13_host_async.md) 从“CPU 已交出工作，GPU 可能仍在计算”开始。复用逐元素向量运算，同一次 launch 分别记录提交返回和等待完成后的 CPU 时刻，再用同 stream Event 对照 GPU 区间。核心是指出等待放在哪个时间边界里，以及区分 CPU 提交 Event 请求与 GPU 到达标记的时刻。
+
+`wait_on_host()` 原有一处练习，2026-10-29 已按用户要求由 Codex 实现并验证。用户已提供 NSYS GUI 截图，选中第五次 `repeated_add`，结合 CPU/GPU 关联高亮询问提交与执行的对应关系。本页末尾的 Ch13 总结整理实际提问、三种时间范围、正式数据和 GUI 读图；实现及工具验证由 Codex 完成，个人运行和完整独立解释待验收，不将截图或已讲解等同于独立掌握。
+
 ## 首轮贯穿的观察问题
 
 | 观察问题 | 将使用的程序证据 |
@@ -1111,3 +1117,138 @@ shared 显式复用减少重复 global 请求，但增加 shared 读写和同步
 任选一个线程，指出它负责的 C[row,col]，说明 base=0 和 base=16 时分别装载哪两个输入、内层 p=5 时从哪些线程写入的 shared 位置取数，以及 sum 为什么能保留所有轮次贡献。再解释两个 barrier 分别保护什么，为什么输出越界的线程仍可能需要装载和同步。
 
 结合本次 157.45/107.67 μs、请求减少 16 倍和 DRAM 约 0.53 MB 的结果，说明 shared 复用发生在哪里、naive 为什么也能利用缓存，以及普通 Event 和 NCU 分别测了什么。以上用于后续独立回答，不额外扩展为 cuBLAS、Roofline、Tensor Core 或多层 GEMM 调优。
+
+
+## 2026-11-02 Ch13：Host 异步与计时边界
+
+### 今日完成任务
+
+本章围绕 [CH13/host_async.cu](../CH13/host_async.cu) 比较 CPU 提交、CPU 等待完成和 GPU Event 三种时间。host、输入、reference 和测量框架由 Codex 提供；唯一等待 TODO 已按用户要求于2026-10-29补全为 `return cudaDeviceSynchronize();`，正式验证及2026-11-02重跑、两次NSYS采集由Codex完成。本次总结只重读源码、日志和CSV，不重新编译、执行GPU或采集。
+
+用户主动询问环境开关、循环次数、measure流程、Event标记为何能包住kernel、同步与查询的区别、三个时间为何不能相加，并要求真实实验和GUI阅读路线。随后提供 `experiment-2026-11-02.nsys-rep` 的GUI截图，选中第五次repeated_add并询问上下蓝色条及Pin row。这证明已打开报告并定位目标kernel，尚不等同于个人编译/采集或完整独立解释；工程与验收证据统一见 [RECORD](RECORD.md)。
+
+### 基本概念
+
+**从一个线程的工作理解实验参数**
+
+<span style="color:red">用户提问：kRepeats这个参数是什么含义？</span>
+
+固定N=65539、float32、block=256、grid=257，每个有效线程负责一个输出，先令sum=a[i]，再将b[i]累加2048次，得到c[i]=a[i]+2048*b[i]。kRepeats表示一次kernel内每线程的循环次数，不是启动2048次kernel。重复运算只用于放大GPU执行区间，使提交与完成的差别更容易观察；末尾block只有3个有效线程，其余线程由边界判断退出。输入为小范围/16的数，使本例中间和可精确表示，误差0不推广为任意FP32实验的要求。
+
+<span style="color:red">用户提问：这里的blocking是干啥的？</span>
+
+`const char* blocking = std::getenv("CUDA_LAUNCH_BLOCKING");` 读取外部环境配置，未设置返回nullptr，设置后指向值字符串；三元表达式有值就打印该值，否则打印unset。这行不修改CUDA配置，也不执行同步。CUDA_LAUNCH_BLOCKING=1用于调试时强制同步kernel启动，未设置或为0时保留正常异步行为；程序拒绝非零配置，避免改变本章实验前提。该参数不是block维度，也不能与CPU等待函数混为一谈。
+
+**提交返回与执行完成是两个边界**
+
+<span style="color:red">用户提问：当前理解CPU和GPU执行是异步的，launch提交后CPU会继续执行下一条指令，对吗？</span>
+
+host异步描述CPU调用返回与GPU工作完成的关系。launch提交任务并检查启动错误后，CPU线程可以继续；GPU可能已经开始，也可能仍在等待调度。这里用“CPU线程继续执行”即可，无需引入“CPU stream”。本例只有一个默认CUDA stream，其中的工作保持顺序，不因host异步就让后面的stop越过前面的kernel。
+
+<mark>launch返回只代表CPU走过了提交调用，不能单凭这一点判断GPU是否完成；异步也不保证每一次调用返回时GPU都尚未完成。</mark> `cudaGetLastError()`检查启动错误，不等待kernel完成。即使后面D2H回读最终得到正确输出，也不能证明之前已经停止的CPU计时包含了GPU执行。
+
+**measure的两个CPU终点与一个GPU区间**
+
+<span style="color:red">用户提问：完成TODO，并告诉我当前measure是如何测量时间的；为什么start Record在t0之前？</span>
+
+关键顺序如下，省略状态检查：
+
+```cpp
+cudaDeviceSynchronize();        // 先等前序工作，位于本次CPU起点之外
+cudaEventRecord(start, 0);       // 提交GPU起点请求
+const auto t0 = Clock::now();
+launch(a, b, c);                 // 包含启动错误检查
+const auto t_submit = Clock::now();
+cudaEventRecord(stop, 0);        // 提交GPU终点请求
+const cudaError_t wait_status = wait_on_host();
+const auto t_complete = Clock::now();
+```
+
+start Record放在t0前，是为了把CPU提交start请求的开销排除在CPU测量外；不是CUDA强制要求，也不保证GPU记录start时间戳一定先于CPU记录t0。两个CPU时间共用t0，改变的是终点；GPU Event使用另外一对设备时间点。
+
+| 结果 | 起点与终点 | 覆盖范围 |
+| --- | --- | --- |
+| launch_us | t0→t_submit | CPU提交kernel及启动错误检查 |
+| complete_us | t0→t_complete | 上述提交，再加stop请求提交和设备完成等待等host开销 |
+| event_us | GPU经过start→GPU经过stop | 两个设备标记之间的工作与可能的间隙 |
+
+`cudaEventElapsedTime(&ms,start,stop)`将Event区间写为毫秒，乘1000后才是event_us的微秒。两个CPU端点之后才查询Event、读取耗时、回读和校验，分配与输入传输也位于计时之外；complete_us不是整个程序的端到端耗时。bench先校验、预热3次和试测，再收集21个单次样本，对三列分别取中位数。
+
+**stop请求可以提前排队，设备终点仍在kernel之后**
+
+<span style="color:red">用户提问：kernel还没执行完就直接打stop标记，start和stop之间有什么意义？是不是没有记录GPU执行耗时？</span>
+
+“打标记”需要区分CPU提交记录请求与GPU真正记录时间。CPU快速把start请求、kernel请求、stop请求依次交给同一stream；GPU按顺序经过它们。stop Record调用不需要CPU先等待kernel，它表达的是“轮到这个位置时记录终点”，不是“CPU现在就给GPU工作盖上结束时间”。
+
+```text
+CPU提交顺序：start请求 → kernel请求 → stop请求 → host等待
+GPU执行顺序：记录start → 执行kernel → 记录stop
+```
+
+<mark>CPU可以在kernel尚未完成时提交stop，但GPU必须完成该stream中前面的kernel，才会到达stop标记。</mark> Event名称只是程序变量名，测量范围由Record位置和stream顺序决定，并不自动代表整个GPU进程的开始/结束；若中间放两个kernel，两者都进入区间。
+
+Event包含kernel，但不保证等于纯kernel执行时间。例如GPU已记录start，CPU尚未提交好kernel，这段间隙进入Event；不能把GPU标记时间戳等同于CPU调用Record的时刻。[CUDA 12.9 Event说明](https://docs.nvidia.com/cuda/archive/12.9.0/cuda-runtime-api/group__CUDART__EVENT.html)
+
+**等待、状态码和查询分别做什么**
+
+<span style="color:red">用户提问：wait_status = wait_on_host()是干啥的？cudaEventQuery(stop)和后面的if是什么意思？</span>
+
+赋值先执行右侧wait_on_host()，其内部cudaDeviceSynchronize()让CPU等到当前设备此前请求的工作完成，返回后再把状态码存入wait_status；状态码不是耗时，const表示初始化后不修改。CUDA_CHECK(wait_status)检查成功或执行阶段错误。这个host等待与block内__syncthreads()用途不同。
+
+cudaEventQuery(stop)只观察该Event捕获的工作是否完成，不主动等到完成；成功返回cudaSuccess，未完成返回cudaErrorNotReady。若未完成，当前防护分支在t_complete之后先安全等待，再返回false拒绝当前样本；计时后的收尾不能修复已结束的区间。正常完成设备同步并成功返回后，这个NotReady分支不应进入；查询也不能代替对等待实现的检查。[CUDA 12.9同步说明](https://docs.nvidia.com/cuda/archive/12.9.0/cuda-runtime-api/group__CUDART__DEVICE.html)
+
+**为什么三种时间不能相加**
+
+<span style="color:red">用户提问：ms、launch_us、complete_us分别是什么？为什么三者加起来不一致？</span>
+
+<mark>complete_us已经包含launch_us，GPU同时在自己的时间线上推进，这些不是互不重叠的三个连续阶段。</mark> 单个样本有精确的CPU区间关系：`complete_us = launch_us + us(t_submit,t_complete)`；Event不等于第二项，因为GPU与CPU的端点不同、工作可能重叠，还有host调用和等待返回开销。三列中位数可能来自不同样本，不能相减给出精确等待时间，更不能把“提交比完成快”称为算法加速。
+
+**本轮真实数据：CPU提交、kernel、Event分别阅读**
+
+<span style="color:red">用户提问：给我真实的实验结果记录，并讲解数据如何体现本章内容；119.928、159.713、250.944这三个有什么区别？</span>
+
+本次总结重读2026-11-02的证据，没有重新采集。当前源码SHA-256与正式日志一致；记录环境为GTX1650 / CC7.5 / 14SM、NVCC12.9.86、Compute Sanitizer2025.2.1.0、NSYS2026.4.1，CUDA_LAUNCH_BLOCKING unset。全部65539项正确、最大绝对误差0、完成边界PASS、memcheck零错误。
+
+以下普通bench与profiler分开运行，warmup=3、samples=21、batch=1，完整输出见 [正式实验日志](../reports/CH13/experiment-2026-11-02.txt)：
+
+| 普通bench，各列独立中位数 | μs |
+| --- | --- |
+| CPU launch_us | 14.818000 |
+| CPU complete_us | 234.205000 |
+| GPU event_us | 209.376007 |
+
+CPU约15μs便走过提交段，但Event约209μs、走到完成边界约234μs；现象与提交返回不等于GPU完成相符。不要把这组数与下面的独立采集混算，也不推广为固定延迟或性能比例。
+
+原NSYS报告中同一个目标样本（第五次kernel，Correlation ID=141）的三种不同范围如下，原始关联见 [CSV](../reports/CH13/experiment-2026-11-02-timeline.csv)：
+
+| 原trace的观测范围 | μs | 证据位置 |
+| --- | --- | --- |
+| CPU开始调用start Record→stop Record返回 | 119.928 | CPU两个API条目的端点差，不等于launch_us |
+| GPU kernel开始→结束 | 159.713 | CUDA HW kernel条的Duration |
+| GPU Event区间 | 250.943989 | 当次程序输出，原报告未采设备Event标记 |
+
+CPU stop Record调用自身只持续13.516μs，但Event仍包含整个kernel区间；说明提交stop请求与设备到达stop是不同动作。Event比kernel区间长，可能含提交、排队、调度及标记边界间隙，本轮没有量化每个因素的贡献。GUI无法从两个CPU Record端点直接得到设备Event区间，也没有单独记录Clock::now()的三个时间点。
+
+另一次启用设备EventTrace的报告见 [标记CSV](../reports/CH13/events-2026-11-02-markers.csv)：GPU start/stop标记间隔170.169μs，中间kernel160.029μs，程序当次Event读数171.552002μs。这组与原250.944μs属于不同运行，不要求数字相同。新报告的CPU同步返回时间戳比GPU结束时间戳早95.177μs，而同步与查询均成功，存在跨轨迹对齐不一致；只用它观察GPU内部标记与区间，不解释为同步提前返回，不作跨轨迹精确耗时分解。工具兼容与报告路径见讲义和ENVIRONMENT，用户首轮不增加环境排障任务。
+
+**GUI的上下蓝色块与Pin row**
+
+<span style="color:red">用户提问：选中第五个repeated_add后为什么有两个蓝色块、位置不一样？上面CUDA HW是kernel，下面CUDA API是CPU launch吗？Pin row有什么用？</span>
+
+用户截图中，上方CUDA HW的第五次repeated_add是GPU执行，右侧Duration=159.713μs；下方host_async线程的CUDA API条是CPU启动调用，NSYS可用目标kernel名字显示它。选择一个会关联高亮另一个，浅青背景是选择范围，不是额外计算。CPU调用较早返回，GPU之后执行，是该截图中的现象；不推广为所有kernel必须在launch返回后才开始。
+
+上方Kernels汇总行与按名称分组的100.0% repeated_add行还各画了一条完全对齐的kernel条，它们是同一次执行在不同层级的重复展示，不是启动两次；百分比也不是本次GPU利用率或occupancy。阅读时以单次事件、Duration和Correlation ID对应，不把汇总图层的重复条目计成额外kernel。
+
+Pin row把某行固定在视口，滚动其他行时仍能看到它，便于同时比较CPU提交与GPU执行。它只改变显示方式，不修改数据或事件的时间位置。用户截图已能同时显示两行时，可以不固定。用户打开原报告和选中目标的截图是实际GUI证据；尚无其在带Event标记的新报告中定位两标记或个人采集的证据，不补写这些操作。
+
+### 踩坑记录
+
+真实疑问主要在把CPU提交Record请求理解为GPU立即记录时间，以及把CPU提交段、GPU执行段与host完成区间当作可相加的阶段。已结合源码顺序、三个测量边界、同一次NSYS样本与用户截图澄清；不把仍在提问等同于独立掌握，也不编造用户实现错误。
+
+原骨架曾因等待TODO未完成而拒绝计时，但数值可正确；当前正式代码已经补全，不能继续把旧INCOMPLETE当成当前故障。GUI图中的CPU launch有时显示kernel名称，汇总行还可能重复展示同一GPU执行，需要按轨迹和关联读取。Pin row只是视图辅助，不是同步操作。设备标记补采报告有跨轨迹对齐不一致的明确边界，不用显示异常推翻已核对的API语义。
+
+### 八股自测
+
+不看答案，按measure顺序解释CPU提交start、记录t0、launch返回、提交stop、设备实际记录两个Event和CPU等待返回分别发生什么；说明为什么stop可以提前排队却仍能包住kernel，以及start Record放在t0前排除了哪部分CPU开销。
+
+再结合14.818/234.205/209.376μs，说明三种时间为何不能相加、complete为何不是整个程序耗时；面对GUI截图指出CPU launch、GPU kernel、汇总行重复显示与同步等待各在哪里，并解释查询为什么不等于等待。以上用于后续独立验收，不新增多stream、拷贝重叠或NVTX改造门槛。

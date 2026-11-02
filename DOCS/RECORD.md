@@ -23,7 +23,7 @@
 | 10 归约 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、两处 TODO 补全、验证及源码/实验讲解 | 正式逐片/总和、三种 Sanitizer 与 Event 通过；用户已复述 shuffle 仍为树形归约，属性、mask、跨 warp 交接已讲解并总结，个人运行及完整独立解释待验收 |
 | 11 SM 与 occupancy | RUNNING | 45～60min | — | 未评估 | Codex 骨架、两处 TODO 补全、验证及讲解总结 | 正式资源/数值、三种 Sanitizer、Event 与 API/NCU 通过；预留 0/16/32 KiB、理论驻留 4/3/1 blocks/SM；shared 来源、容量推导及 NCU 平均值已讲解总结，个人操作与独立解释待验收 |
 | 12 数据复用 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、两处 TODO 补全、验证及讲解总结 | 正式版两种 shape 全量校验、三种 Sanitizer 与 Event 通过；历史 NCU 对照保留；用户已正确复述固定输出与沿 K 分块累加，个人运行及同步/尾部/缓存边界的完整独立解释待验收 |
-| 13 Host 异步 | TODO | 45～60min | — | 未评估 | 未开始 | — |
+| 13 Host 异步 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、TODO 补全、验证、计时及GUI讲解总结 | 正式数值、完成边界、memcheck、计时及NSYS关联通过；用户已提供GUI截图并定位第五次kernel，个人程序运行/采集及完整独立解释待验收 |
 | 14 Stream | TODO | 45～60min | — | 未评估 | 未开始 | — |
 | 15 Event 与重叠 | TODO | 45～60min | — | 未评估 | 未开始 | — |
 | 16 Graph | TODO | 45～60min | — | 未评估 | 未开始 | — |
@@ -533,3 +533,60 @@ Ch12 记 RUNNING，仅表示骨架与教学预检已开展；用户完成部分�
 重读正式源码、completed 日志和历史 NCU CSV，核对正式源码 SHA-256 一致。已有正式主 shape 65536 项与尾部 1961 项，两种算法均 PASS、最大绝对/相对误差 0；三种 Sanitizer 零错误、racecheck 零 warnings。正式普通 Event 为 naive/tiled 157.452798/107.673597 μs/次，warmup=10、samples=21、batch=5，比值约 1.462、耗时降低约 31.6%。历史临时版 NCU 请求数 1048576/65536、sectors 2097152/261594、DRAM 537728/528000 字节，L2 容量 1048576 字节；A+B 合计 524288 字节。说明缓存复用与两个 DRAM 读数接近相符，但既不能由容量证明全部命中，也不能将差额 9728 字节解释为确定且稳定的收益。计时、采集版本与指标层次分别记录，不量化未采集的因果贡献，不把 replay 前清缓存误读为 kernel 内禁用缓存。
 
 本次仅更新 NOTE 与 RECORD，核对日志数值、CSV 单位、源码哈希、文档链接和 diff 格式；未重新编译、运行 GPU、计时、采集 profiler 或操作 GUI，无新增临时文件。Ch12 保持 RUNNING，分块累加主线已有用户复述，个人运行及同步、边界、缓存/计时证据的完整独立解释仍待验收。两处实现与工程验证由 Codex 完成，实际学习与工程执行耗时未记录；无计划偏离、新依赖或新增课程门槛，无需额外 Claude 审阅，未启动 Claude、未提交或推送，保留既有工作区改动。
+
+
+## 2026-10-28：Ch13 Host 异步内容生成与预检
+
+用户明确要求“生成CH13内容”。按 PLAN 阶段 C 新增 [CH13/host_async.cu](../CH13/host_async.cu) 与 [Host 异步讲义](chapters/13_host_async.md)，更新 PLAN 目录/准备依据与 NOTE 预习入口。复用逐元素向量运算，固定 N=65539、float32、block=256、grid=257、每线程累加 2048 次；三个 device 数组各 262156 字节。一个实验只改变计时终点，对照同一次 launch 的 CPU 提交段、CPU 到等待完成边界及同 stream GPU Event。正式源码保留 wait_on_host() 一处 TODO，host、输入、独立 CPU reference、全量校验、预热、计时与安全收尾由 Codex 提供。
+
+现场复核 GTX 1650 / CC 7.5 / 14 SM / 4096 MiB、KMD 610.88、NVCC 12.9.86、Compute Sanitizer 2025.2.1.0、NSYS 2026.4.1，CUDA_LAUNCH_BLOCKING unset；按本机 cuda_runtime_api.h 和 CUDA 12.9 官方同步语义核对 API。正式骨架与仅补等待调用的临时版编译均无警告、无 spill，每线程 10 个寄存器、无 barrier。两版全量 65539 项均 PASS、最大绝对误差 0；输入为 /16 小数，本例所有中间和可精确表示，不推广任意 FP32。两版 memcheck（padding=32、error-exitcode=99）均零工具错误；骨架 check/bench/工具命令退出 1，原因是等待练习占位并拒绝计时，非工具错误。临时补全版 check、工具命令及 bench 均退出 0。
+
+普通 bench 与工具检查、NSYS 分开运行。warmup=3、samples=21、batch=1，另有一次数值预检与完成边界试运行；每个样本起点前等待前序工作，末端后回读校验。CPU launch 段、CPU 到完成边界、GPU Event 三列中位数分别为 15.018000/228.564000/205.311999 μs。CPU launch 段含错误检查，完成边界还含 stop Event 提交与等待开销；start Event 提交位于 CPU 起点之前，Event 可能含 host 提交间隙。三列均不含分配、传输、CPU reference/校验；不将中位数相减当精确等待时间，不将比值称为算法加速或泛化固定耗时。
+
+NSYS 采临时补全版 trace，共 5 次 kernel（数值预检 1、预热 3、测量 1），CLI stats 及 SQLite 关联已核对。最后一次 Correlation ID=141，CPU launch API 10.309 μs、GPU kernel 160.161 μs、后续同步 API 193.057 μs；NSYS 分配后的寄存器为 16，与编译报告 10 分别记录。该 WSL 报告同步返回与 GPU 结束的绝对时间端点约有 8 μs 错位，不据此推断同步提前返回或精确跨轨迹等待时长。未操作 GUI；NCU、racecheck、synccheck 均 NOT RUN，本例无 shared/barrier，不增加额外课程门槛。
+
+原始命令、两版源码 SHA-256、补全差异、输出和退出码见 [预检日志](../reports/CH13/preflight-2026-10-28.txt)，正式证据保留 [NSYS](../reports/CH13/preflight-2026-10-28.nsys-rep)、[SQLite](../reports/CH13/preflight-2026-10-28.sqlite) 与 [时间关联 CSV](../reports/CH13/preflight-timeline-2026-10-28.csv)。临时补全源码和二进制已清理，正式 build 对应保留 TODO 的骨架。完成预检后仅调整一处说明查询边界的源码注释，最终重新编译并确认骨架预期行为；该注释改动不改变实验实现，最终哈希另存日志。
+
+Ch13 记 RUNNING，仅代表课程骨架和教学预检已准备；用户完成部分尚无证据，TODO、个人运行与对提交/完成、错误检查、host/block 同步及 CPU/Event 边界的独立解释待验收。前章状态保留。计划学习 45～60 分钟，实际学习与工程准备/agent 执行耗时未记录。无计划范围偏离、无新依赖，不引入多 stream、pinned memory 或传输重叠；无需额外 Claude 审阅，未启动 Claude、未提交或推送。
+
+
+## 2026-10-29：Ch13 TODO 正式补全与 measure 计时边界讲解
+
+用户要求“完成TODO，并告诉我当前这个measure是如何测量时间的”。按 PLAN 阶段 C，Codex 在 [wait_on_host()](../CH13/host_async.cu) 返回 cudaDeviceSynchronize() 的状态，移除 TODO、NotReady 占位及对应未完成收尾分支；保留调用方错误检查和额外 stop Event 查询。未改 kernel、N=65539、float32、block=256、grid=257、每线程累加2048次、输入、reference 或计时端点。更新 PLAN 目录、讲义当前行为和 NOTE 的 measure 数据流，保留用户既有工作区修改与历史预检。
+
+现场复核 GTX 1650 / CC 7.5 / 14 SM / 4096 MiB、KMD 610.88，NVCC 12.9.86、Compute Sanitizer 2025.2.1.0，CUDA_LAUNCH_BLOCKING unset；签名及语义按本机头文件和 CUDA 12.9 官方资料核对。正式编译无警告、无 spill，10 个寄存器/线程、无 barrier；全部 65539 项 PASS、最大绝对误差 0，完成边界 PASS；memcheck（padding=32、error-exitcode=99）零错误。check、memcheck、bench 均退出 0。
+
+普通 bench 与工具检查分开，warmup=3、samples=21、batch=1；CPU launch 段 / CPU 到完成边界 / 同 stream GPU Event 三列中位数为 15.950000 / 228.193000 / 203.263998 μs。说明初始清空前序工作的同步和 start Event 的 host 提交位于 CPU 区间外，t_submit 在 launch 与错误检查之后，t_complete 在 stop Event 提交及设备等待之后；GPU Event 记录设备经过两事件之间的时间，查询/读取耗时及 D2H 校验位于 CPU 终点后。两种时钟和端点不同，不必相等；三列中位数分别计算，不将相减当作精确等待时间或用比值宣称算法加速，不与历史预检作性能 A/B。
+
+原始命令、正式源码 SHA-256、编译信息、输出和退出码见 [正式补全日志](../reports/CH13/completed-2026-10-29.txt)。本轮 NSYS、NCU、GUI、racecheck、synccheck 均 NOT RUN；历史临时版 NSYS 不冒充本轮采集，无临时补全文件或新增依赖。Ch13 保持 RUNNING，实现与验证由 Codex 完成，用户个人运行与完整独立解释待验收；计划学习45～60分钟，实际学习与工程执行耗时未记录。无计划偏离，无需额外 Claude 审阅，未启动 Claude、未提交或推送。
+
+
+## 2026-11-02：Ch13 正式实验重跑、真实结果记录与解读
+
+用户要求“给我真实的实验结果记录，并讲解数据如何体现本章内容”。核对当前 CH13/host_async.cu 与2026-10-29正式日志 SHA-256一致，未修改 CUDA 源码，正式重编译后执行 check、memcheck、独立普通 bench 和 NSYS trace/stats，全部退出0。环境为GTX 1650 / CC7.5 / 14SM / 4096MiB / KMD610.88，NVCC12.9.86、Compute Sanitizer2025.2.1.0、NSYS2026.4.1，CUDA_LAUNCH_BLOCKING unset。shape/dtype为N=65539、float32，block=256、grid=257、每线程2048次累加；编译无警告、无spill、10寄存器/线程。全量65539项正确、最大绝对误差0，完成边界PASS，memcheck（padding=32）零错误。
+
+普通bench为warmup=3、samples=21、batch=1，先校验再测量，另有完成边界试测；CPU launch / CPU到完成 / GPU Event三列中位数为14.818000 / 234.205000 / 209.376007 μs。不包含分配、传输和CPU校验；三列分别取中位数，不相加、不将差额当精确等待，不与历史或profiler数值作性能A/B。
+
+独立NSYS trace共5次kernel，最后一次Correlation ID=141。CPU start Record / launch API / stop Record / sync API分别持续25.679 / 64.132 / 13.516 / 180.693 μs，GPU kernel159.713 μs；该次程序打印host_launch66.326 μs、host_complete261.487 μs、Event250.943989 μs。CPU从start Record调用入口到stop Record返回为119.928 μs，与GPU Event区间不是同一测量。报告中stop Record返回早于GPU kernel结束178.232 μs，而Event仍包含kernel，结合同stream顺序说明“提交stop请求不等于立即记录GPU终点”。Event比纯kernel区间更长，可能包含提交/排队/调度及标记边界间隙，本轮未分解各因素贡献。查询stop返回cudaSuccess；未将CPU Record端点当GPU Event时间戳，也不把跨轨迹微小端点差当精确硬件耗时。
+
+原始命令、环境、源码哈希、输出和退出码见 [本轮实验日志](../reports/CH13/experiment-2026-11-02.txt)，保留 [NSYS](../reports/CH13/experiment-2026-11-02.nsys-rep)、[SQLite](../reports/CH13/experiment-2026-11-02.sqlite) 与 [时间关联CSV](../reports/CH13/experiment-2026-11-02-timeline.csv)。更新讲义的本轮结果、NOTE的提交/执行区别及本页；无CUDA代码修改、新依赖或临时补全文件，GUI/NCU/racecheck/synccheck本轮NOT RUN。Ch13保持RUNNING，实验与记录由Codex完成，用户个人运行及完整独立解释待验收；实际学习与工程执行耗时未记录。无计划偏离，无需额外Claude审阅，未启动Claude、未提交或推送，保留原工作区改动。
+
+
+## 2026-11-02：Ch13 NSYS GUI 路线及设备 Event 标记补采
+
+用户询问如何通过GUI查看本章几个时间的真实分布。核对默认GUI版本2025.1.3与采集CLI2026.4.1不一致，当前环境没有匹配Linux GUI；未安装升级，也未声称完成GUI交互。按官方文档给出匹配版本要求、File/Open、CPU CUDA API与GPU行、最后一个kernel/correlation141、Events View查找、tooltip端点及Duration的阅读路线。原报告CPU Record区间119.928 μs与kernel159.713 μs可直接核对；原报告未启用设备EventTrace，其250.943989 μs应读当次程序输出。Clock::now的三个时间点未被单独记录，GUI不能逐点精确还原完整host计时。
+
+未改源码，另以 --cuda-event-trace=true 采正式trace，65539项全量PASS、误差0，profile/stats退出0；[新报告](../reports/CH13/events-2026-11-02.nsys-rep)、[日志](../reports/CH13/events-2026-11-02.txt)、[SQLite](../reports/CH13/events-2026-11-02.sqlite)、[标记CSV](../reports/CH13/events-2026-11-02-markers.csv)保留。设备Event表确认start/stop两行，eventId1/2、correlation140/143，时间差170.169 μs；中间kernel correlation141、160.029 μs；程序当次Event171.552002 μs，host_launch/complete15.900/303.307 μs。不同采集不得与原119.928/159.713/250.944或普通bench混算。
+
+这份新报告CPU同步返回与GPU结束时间戳存在95.177 μs反向错位，但同步及查询均成功，说明本次跨轨迹绝对时间对齐不可作为严格完成顺序证据；仅用新报告GPU内部标记/区间教学，不推断同步提前返回，也不追求逐小数位Event读数等同。附明确边界，未追加低收益环境排查。更新讲义、ENVIRONMENT及本页；无新依赖、源码更改或临时尝试产物，无计划偏离，无需额外Claude审阅。Ch13保持RUNNING，个人GUI操作与完整独立解释待验收，实际学习与工程执行耗时未记录；未提交或推送，保留原工作区改动。
+
+
+## 2026-11-02：Ch13 本章总结
+
+按用户“总结本章内容”的要求，整合NOTE的Ch13阅读入口，并新增“今日完成任务、基本概念、踩坑记录、八股自测”完整复盘。覆盖参数及CUDA_LAUNCH_BLOCKING读取、host异步与同stream顺序、measure的CPU/GPU时间边界、start Record为何放在t0之前、CPU提交stop与GPU实际到达stop的区别、wait_status状态/完成等待、Event查询防护、三种时间的包含/重叠关系、真实数据的分组解释，以及GUI关联高亮、汇总行重复条形和Pin row。以红色问题标签记录用户真实疑问，用mark标出核心结论，不扩展多stream、拷贝重叠或NVTX必修。
+
+重读正式源码及completed-2026-10-29、experiment-2026-11-02、events-2026-11-02日志/CSV，源码SHA-256一致。核对普通bench三列14.818000/234.205000/209.376007μs；原NSYS同一目标样本CPU Record区间119.928μs、GPU kernel159.713μs、程序Event250.943989μs，CPU stop Record自身13.516μs。设备标记补采的170.169/160.029μs及程序Event171.552002μs分别记录，并保留跨轨迹95.177μs反向错位、采集开销和不同运行不得混算的边界。既有全量65539项正确、误差0、完成边界PASS及memcheck零错误未冒充本次重新执行。
+
+将后续新增的用户GUI截图纳入验收证据：用户已打开原实验报告、选中第五次repeated_add，截图显示159.713μs的GPU条形及关联CPU调用；这更新了先前“个人GUI操作待补”的状态。截图不证明个人编译/采集、完成新报告Event标记定位或完整独立解释，实际GUI所在系统和版本也不从截图推定。Ch13仍RUNNING，辅助实现与工具验证由Codex完成，待用户个人程序运行/采集及完整复述；实际学习和本次文档整理耗时未记录。
+
+本次仅更新NOTE与RECORD，验证源码哈希、已有日志/CSV数据、文档链接和diff格式；未修改CUDA源码、重新编译、执行GPU、采集profiler或操作GUI，无新增临时文件。无计划偏离、新依赖或额外课程门槛，无需额外Claude审阅，未启动Claude、未提交或推送，保留已有工作区改动。

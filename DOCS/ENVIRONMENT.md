@@ -31,3 +31,10 @@ GTX 1650 没有 Tensor Core，因此 Tensor Core 加速不列为本机实践目�
 ## 2026-09-20 Ch03 补充核验
 
 本次复核 NVCC 12.9.86、GTX 1650 / CC 7.5，并首次实际核验 Compute Sanitizer 2025.2.1.0。`memcheck --padding 32 --error-exitcode 99` 对 Ch03 正常案例和临时修复版报告零错误，对故意越界写入报告源码与线程位置；命令、退出码及原始输出见 `reports/CH03/preflight.txt`，解释见 [Ch03](chapters/03_error_check.md)。仅验证本章 memcheck 路径，不代表 racecheck 等其他功能已验证。当前 Git 已存在，早期“尚未初始化 Git”仅为历史快照；本次未初始化、提交或推送。
+
+
+## 2026-11-02 Ch13 GUI 与设备 Event Trace 核验
+
+当前默认 nsys-ui 路径为 /usr/local/cuda-12.9/bin/nsys-ui，实际GUI版本2025.1.3.140；命令行nsys为2026.4.1。新报告需以2026.4.1或更新GUI打开，本次未安装或升级GUI，未声称完成GUI交互验证。GUI版本查询打印WSL/OpenGL回退信息，但成功输出版本。
+
+CLI的 --cuda-event-trace 默认false；本次启用true成功采到两个设备Event完成标记。记录、报告与WSL下跨CPU/GPU时间对齐不一致的边界说明见 [Ch13 GUI路线](chapters/13_host_async.md#nsys-gui-阅读路线2026-11-02) 及 [日志](../reports/CH13/events-2026-11-02.txt)。只验证本例、当前驱动与采集方式，不将其推广为所有版本和功能都可用。

@@ -155,7 +155,8 @@ CH09/                                       # shared stride 32/33 地址练习�
 CH10/                                       # shared / warp shuffle 归约均已按要求补全，个人解释待验收
 CH11/                                       # occupancy 查询及 dynamic shared launch 均已按要求补全，个人解释待验收
 CH12/                                       # 单层 FP32 tiled GEMM 两处练习已按要求补全，个人解释待验收
-CH13/ ... CH19/                              # 按需创建
+CH13/                                       # Host 等待练习已按要求补全，个人运行与解释待验收
+CH14/ ... CH19/                              # 按需创建
 common/                                      # 逐步提取的检查、计时 helper
 scripts/                                     # 按需新增 env/profile/export 脚本
 DOCS/chapters/XX_topic.md                     # 一章一份简短任务和实验记录
@@ -208,3 +209,4 @@ Reference 查参数、错误与同步语义，Programming Guide 查执行机制�
 | 2026-10-26 | 准备 Ch10 独立 shared 树形与 warp shuffle 归约练习及预检 | 用户明确要求“生成CH10内容”；固定完整 warp、每 block 256 项，CPU 汇总 block 和，保留两处关键 TODO；不引入尾部 mask、跨 block GPU 归约或新增 profiler 门槛，不补记前章完成 |
 | 2026-10-27 | 准备 Ch11 固定 kernel 的 dynamic shared 资源对照骨架、讲义与预检 | 用户明确要求“生成CH11内容”；复用 Ch10 shuffle 求和，固定 grid/block/input，仅改变每 block 额外预留 0/16/32 KiB，保留 occupancy 查询和 launch 字节数两处 TODO；API 与 NCU 对照，寄存器只读编译报告，不追加调参或前章验收 |
 | 2026-10-28 | 准备 Ch12 单层 FP32 tiled GEMM 骨架、讲义与教学预检 | 用户明确要求“生成CH12内容”；固定 16×16 block 与主 shape，比较 naive 与 shared 复用，保留装载/累加两处 TODO；非整除尺寸仅校验边界，NCU 为可选对照，不引入 cuBLAS、Roofline、Tensor Core 或多层 tiling，不补记前章完成 |
+| 2026-10-28 | 准备 Ch13 Host 异步骨架、计时边界讲义及 NSYS 预检 | 用户明确要求“生成CH13内容”；固定同一次向量运算，对照 CPU launch 段、CPU 到完成边界与同 stream Event，保留一处 host 等待 TODO；不引入多 stream 或拷贝重叠，不补记前章完成 |
