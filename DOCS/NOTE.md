@@ -34,6 +34,14 @@
 
 `wait_on_host()` 原有一处练习，2026-10-29 已按用户要求由 Codex 实现并验证。用户已提供 NSYS GUI 截图，选中第五次 `repeated_add`，结合 CPU/GPU 关联高亮询问提交与执行的对应关系。本页末尾的 Ch13 总结整理实际提问、三种时间范围、正式数据和 GUI 读图；实现及工具验证由 Codex 完成，个人运行和完整独立解释待验收，不将截图或已讲解等同于独立掌握。
 
+## Ch14 阅读入口（2026-11-02）
+
+[Stream 讲义](chapters/14_streams.md) 从“两个独立任务放进一条或两条队列”开始。复用 Ch13 的逐元素累加，A/B 读写不同数组片段，只改变 B 的目标 stream。先预测同队列的先后与双队列可能的重叠，再完成创建和启动路由两处练习，最后在 NSYS 按 stream 与 Correlation ID 观察两个 GPU 区间。
+
+2026-11-02 已按用户要求由 Codex 补全两处练习：`create_work_stream()` 用 `cudaStreamCreateWithFlags` 创建 nonblocking 队列，`launch()` 把调用方传入的 stream 放入第四个启动参数。创建决定有哪些队列，启动参数决定本次任务放入哪条队列；`cudaStreamGetFlags` 只查询配置，不修改队列。实现由 Codex 辅助完成，个人运行与独立解释仍待验收。
+
+阅读重点是同 stream 保序、不同 stream 的 CPU 提交顺序不能替代设备依赖，以及 stream 不固定对应 SM。host 在两个 launch 都提交后才依次等待两队列，等待 s0 不会阻止已经提交到 s1 的独立任务推进；实际是否并发由本次 GPU 时间线判断。普通 host_pair 覆盖提交与完成等待，不能当作单 kernel 的 GPU 时间。本页末尾的 Ch14 总结整理实际提问、两类实验数据和用户提供的 GUI 截图；个人实现与采集、完整独立解释仍待验收。跨 stream Event 和传输流水留到 Ch15。
+
 ## 首轮贯穿的观察问题
 
 | 观察问题 | 将使用的程序证据 |
@@ -1252,3 +1260,94 @@ Pin row把某行固定在视口，滚动其他行时仍能看到它，便于同�
 不看答案，按measure顺序解释CPU提交start、记录t0、launch返回、提交stop、设备实际记录两个Event和CPU等待返回分别发生什么；说明为什么stop可以提前排队却仍能包住kernel，以及start Record放在t0前排除了哪部分CPU开销。
 
 再结合14.818/234.205/209.376μs，说明三种时间为何不能相加、complete为何不是整个程序耗时；面对GUI截图指出CPU launch、GPU kernel、汇总行重复显示与同步等待各在哪里，并解释查询为什么不等于等待。以上用于后续独立验收，不新增多stream、拷贝重叠或NVTX改造门槛。
+
+## 2026-11-02 Ch14：Stream 队列与独立任务并发
+
+### 今日完成任务
+
+本章在 [CH14/streams.cu](../CH14/streams.cu) 中用两个独立的向量累加任务，对照同一 stream 与两条 stream 的执行。每任务4099项、float32、block=256、grid=17、每线程8192次累加；两个模式只改变任务B的目标stream，不改变计算内容。用户要求“完成TODO1和TODO2”，两处实现与正式编译、校验、memcheck及计时均由Codex完成。用户随后要求结合结果解释stream作用，并提供NSYS GUI截图询问默认队列中的Memory活动；这属于实际读图交流，不等同于个人实现或采集已完成。
+
+### 基本概念
+
+**Stream 管的是工作顺序**
+
+<span style="color:red">用户提问：stream的作用是什么？从实验结果讲解本例中stream起到的作用。</span>
+
+stream可以理解为GPU工作的有序队列，能组织kernel、内存拷贝和填充等任务。同一队列里的普通任务按提交顺序执行；没有额外依赖的不同队列可以独立推进，实际是否重叠由设备能力、资源和调度决定。<mark>同stream保证先后，不同stream提供并发机会；stream不固定对应某个SM，也不保证更快。</mark> [CUDA 12.9 Streams](https://docs.nvidia.com/cuda/archive/12.9.0/cuda-c-programming-guide/index.html#streams)
+
+```text
+same： s0：A → B
+split：s0：A
+       s1：B    （可以重叠，实际看时间线）
+```
+
+本例A使用a/b/c的前4099项，B的三个指针分别加上kN，使用后4099项。B的block0/thread3局部索引仍为3，实际写整个c数组的第4102项；A的对应线程写第3项。因此二者没有数据读写依赖，可以安全地放到不同队列。本章不演示B读取A结果的情况，那需要另外建立依赖。
+
+**创建配置、队列句柄和启动目标是三个环节**
+
+<span style="color:red">用户提问：s0/s1创建后的检查是干啥的？flags是干啥的？“不与legacy默认stream隐式同步”是什么意思？</span>
+
+`cudaStream_t s0, s1`保存队列句柄，可理解为后续指定队列的标识；把`&s0`传入创建函数，是让它将新队列句柄写回s0。当前`create_work_stream()`返回`cudaStreamCreateWithFlags(stream, cudaStreamNonBlocking)`的状态，main检查返回值并负责最终销毁。
+
+flags是创建队列时的行为选项。`cudaStreamGetFlags(s0, &flags0)`将查到的配置写入flags0，函数返回的状态交给CUDA_CHECK检查；查询本身不改变配置。`streams_ready`先检查s0/s1都不是nullptr且互不相同，再检查两者的flags都符合本章的nonblocking要求。nullptr在本例是默认stream占位，不代表默认队列本身无效。
+
+“隐式同步”指代码没显式写等待，CUDA仍按默认规则安排了等待。例如本项目使用legacy默认stream时，先在默认队列提交A，再往普通创建的队列提交B，会有默认同步规则让B等A。`cudaStreamNonBlocking`让新队列不参与与legacy默认队列的这层隐式同步。<mark>NonBlocking不会取消默认stream，也不会取消显式同步等待，更不等于保证并发。</mark> [CUDA 12.9 Stream配置](https://docs.nvidia.com/cuda/archive/12.9.0/cuda-runtime-api/group__CUDART__STREAM.html)
+
+创建后还要在kernel启动时指定队列。当前`launch()`将传入stream赋给target，放在`<<<grid, block, 0, target>>>`的第四项，并返回实际使用的target供路由检查。第三项0表示动态shared字节数。两种模式都创建相同配置的s0/s1，本实验改变的是B的启动目标，未单独对照NonBlocking选项的性能。
+
+**run_pair：先提交两个任务，再等待它们都完成**
+
+<span style="color:red">用户提问：讲解run_pair这一段。</span>
+
+函数先等待前序工作结束，用cudaMemset将输出的每个字节填为0xff，在本例float数组中形成NaN哨兵，便于校验发现漏写；再等待填充完成。这些准备位于计时之外。`split ? s1 : s0`决定B的目标队列，然后按以下顺序执行：
+
+```text
+记录t0 → 提交A到s0 → 提交B到指定队列
+       → 等A实际所在队列 → 若B在另一队列，再等那条队列 → 记录t1
+```
+
+<mark>两个launch之间没有host等待；CPU等s0时，已经提交到s1的独立B仍能推进。</mark> 同队列时只需同步一次，因为等待覆盖该队列此前提交的两个kernel。`used_a/used_b`保存实际队列，不是计算结果；`run_pair()`返回值检查两条显式队列及启动目标是否符合要求，数值正确性在函数外检查，是否并发看GPU时间线。
+
+`double& host_us`是输出参数，函数将`t1-t0`换算成微秒写回。host_pair包含两次提交、启动错误检查及完成等待；分配、输入传输、哨兵准备、输出回读和CPU校验在外。它不是单kernel的GPU时间，也不是整个程序耗时；本章不拿单条队列的Event终点代表两队列都完成。
+
+**实验结果：耗时变化和GPU重叠分别看**
+
+本次总结重读既有证据，未重跑实验。当前源码SHA-256与 [正式补全日志](../reports/CH14/completed-2026-11-02.txt)一致。日志环境为GTX1650 / CC7.5 / 14SM、NVCC12.9.86、Compute Sanitizer2025.2.1.0，CUDA_LAUNCH_BLOCKING unset；same/split队列配置及路由通过，各8198项全量正确、最大绝对误差0，memcheck零错误。
+
+正式版普通bench先校验、预热3次，再收集21个单次pair样本，每个样本在计时外回读校验：
+
+| 模式 | 任务放置 | host_pair中位数 μs |
+| --- | --- | --- |
+| same | A/B都放s0 | 173.116 |
+| split | A放s0，B放s1 | 129.053 |
+
+本轮双队列完成整对工作的host区间较短，不能仅凭这个差值证明GPU重叠或量化并发的全部贡献。独立NSYS证据来自此前临时完整补全版，未冒充正式版新采集；以各报告目标A的GPU开始时刻为0，既有 [目标区间CSV](../reports/CH14/preflight-2026-11-02-timeline.csv)为：
+
+| 模式 | A/B的stream ID | A的GPU区间 μs | B的GPU区间 μs | 重叠 μs |
+| --- | --- | --- | --- | --- |
+| same | 13 / 13 | 0～69.276 | 75.740～144.760 | 0 |
+| split | 13 / 14 | 0～69.823 | 3.904～102.943 | 65.919 |
+
+same中B在A结束后开始；split中A尚未结束，B在3.904μs已经开始，直接显示那次采集的GPU执行区间发生交叠。整对GPU跨度分别144.760/102.943μs。<mark>普通计时描述这轮host完成区间，NSYS描述另次采集的GPU区间；二者不能拼成一次运行或直接相减。</mark> 该结果不说明每个SM上如何分配任务，也不保证换任务后仍有同样收益。原始报告及完整边界见 [讲义](chapters/14_streams.md)。
+
+**默认队列为何仍有Memory活动**
+
+<span style="color:red">用户提问：为什么NSYS关于Memory还有一个Default stream？之前launch没有指定具体stream或指定stream 0，0就是默认的吗？</span>
+
+用户截图显示Stream13、Stream14中的repeated_add，以及Default stream7上的Memory活动，下方还有CPU的cudaMemcpy调用。本例只将两个计算kernel明确指定到s0/s1，输入上传、输出填充和结果回读仍调用未指定stream的cudaMemcpy/cudaMemset，因此仍走默认队列。只读复核已有split SQLite，Memcpy与Memset活动的streamId均为7。不能把Memory行理解为kernel每次读取a/b时另建一条队列。
+
+在本项目当前编译方式下，`kernel<<<grid, block>>>(...)`与`kernel<<<grid, block, 0, 0>>>(...)`等价：第四项0表示默认stream，第三项0仍是动态shared字节数。报告中的Default stream7与代码默认句柄0属于不同编号表达，不要求数值相同。<mark>创建显式队列不会把所有CUDA操作自动搬过去，未指定队列的操作仍使用默认stream。</mark>
+
+本例在提交kernel前显式等哨兵准备完成，在回读前显式等两队列完成，保证内存操作与计算之间的正确顺序。截图可以证明用户已经接触相应GUI轨迹，不能据此认定个人编译、运行、采集或完整独立解释全部完成；不从截图推定报告文件名、GUI版本或每个色块的具体活动，准确类型以tooltip及报告记录为准。
+
+### 踩坑记录
+
+本章真实疑问集中在stream的作用、flags与NonBlocking含义、配置检查、run_pair等待顺序，以及默认stream为何出现在内存轨迹中。已结合源码与证据解释；这些提问不等同于用户写错代码或已独立掌握，不补造调试经历。
+
+原骨架的两处TODO已由Codex补全，当前正式版应PASS，不能继续把历史骨架退出1当作现有故障。数值正确只说明输出正确，配置/路由检查只说明队列选择符合要求，GPU区间交集才是那次采集发生重叠的直接证据。创建队列、选择启动目标与CPU等待是不同动作；NonBlocking也不是让所有同步函数都立即返回的开关。
+
+### 八股自测
+
+不看代码，解释s0/s1的创建、flags查询、第四个启动参数和cudaStreamSynchronize分别做什么；画出same/split中A/B的队列关系，说明为何B不读A的结果，以及为什么“先提交两个任务，再依次等队列”仍有并发机会。
+
+再结合173.116/129.053μs与NSYS的65.919μs重叠，分别说出两类数据能证明什么；指出GUI里的两个计算stream和默认stream内存活动，解释代码的stream0、报告ID7以及启动配置两个0的区别。以上用于后续独立验收，不扩展跨stream Event、pinned memory、传输流水或SM资源调优。

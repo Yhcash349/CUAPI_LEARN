@@ -156,7 +156,8 @@ CH10/                                       # shared / warp shuffle 归约均已
 CH11/                                       # occupancy 查询及 dynamic shared launch 均已按要求补全，个人解释待验收
 CH12/                                       # 单层 FP32 tiled GEMM 两处练习已按要求补全，个人解释待验收
 CH13/                                       # Host 等待练习已按要求补全，个人运行与解释待验收
-CH14/ ... CH19/                              # 按需创建
+CH14/                                       # stream 创建与启动路由均已按要求补全，个人运行与解释待验收
+CH15/ ... CH19/                              # 按需创建
 common/                                      # 逐步提取的检查、计时 helper
 scripts/                                     # 按需新增 env/profile/export 脚本
 DOCS/chapters/XX_topic.md                     # 一章一份简短任务和实验记录
@@ -210,3 +211,4 @@ Reference 查参数、错误与同步语义，Programming Guide 查执行机制�
 | 2026-10-27 | 准备 Ch11 固定 kernel 的 dynamic shared 资源对照骨架、讲义与预检 | 用户明确要求“生成CH11内容”；复用 Ch10 shuffle 求和，固定 grid/block/input，仅改变每 block 额外预留 0/16/32 KiB，保留 occupancy 查询和 launch 字节数两处 TODO；API 与 NCU 对照，寄存器只读编译报告，不追加调参或前章验收 |
 | 2026-10-28 | 准备 Ch12 单层 FP32 tiled GEMM 骨架、讲义与教学预检 | 用户明确要求“生成CH12内容”；固定 16×16 block 与主 shape，比较 naive 与 shared 复用，保留装载/累加两处 TODO；非整除尺寸仅校验边界，NCU 为可选对照，不引入 cuBLAS、Roofline、Tensor Core 或多层 tiling，不补记前章完成 |
 | 2026-10-28 | 准备 Ch13 Host 异步骨架、计时边界讲义及 NSYS 预检 | 用户明确要求“生成CH13内容”；固定同一次向量运算，对照 CPU launch 段、CPU 到完成边界与同 stream Event，保留一处 host 等待 TODO；不引入多 stream 或拷贝重叠，不补记前章完成 |
+| 2026-11-02 | 准备 Ch14 同/不同 stream 的独立双任务骨架、讲义与 NSYS 预检 | 用户明确要求“生成CH14内容”；仅改变第二个 kernel 的目标 stream，保留 stream 创建与启动路由两处 TODO；host 计时等待两队列完成，GPU 重叠由独立 trace 核对，不引入跨 stream Event、pinned memory 或流水，不补记前章完成 |

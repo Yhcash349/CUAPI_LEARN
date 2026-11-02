@@ -24,7 +24,7 @@
 | 11 SM 与 occupancy | RUNNING | 45～60min | — | 未评估 | Codex 骨架、两处 TODO 补全、验证及讲解总结 | 正式资源/数值、三种 Sanitizer、Event 与 API/NCU 通过；预留 0/16/32 KiB、理论驻留 4/3/1 blocks/SM；shared 来源、容量推导及 NCU 平均值已讲解总结，个人操作与独立解释待验收 |
 | 12 数据复用 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、两处 TODO 补全、验证及讲解总结 | 正式版两种 shape 全量校验、三种 Sanitizer 与 Event 通过；历史 NCU 对照保留；用户已正确复述固定输出与沿 K 分块累加，个人运行及同步/尾部/缓存边界的完整独立解释待验收 |
 | 13 Host 异步 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、TODO 补全、验证、计时及GUI讲解总结 | 正式数值、完成边界、memcheck、计时及NSYS关联通过；用户已提供GUI截图并定位第五次kernel，个人程序运行/采集及完整独立解释待验收 |
-| 14 Stream | TODO | 45～60min | — | 未评估 | 未开始 | — |
+| 14 Stream | RUNNING | 45～60min | — | 未评估 | Codex 骨架、讲义、两处 TODO 补全、验证与总结 | 正式版same/split配置/路由、8198项全量数值、memcheck与计时通过；历史临时版NSYS对照及用户双stream/默认stream GUI截图已有证据；个人运行/采集与完整独立解释待验收 |
 | 15 Event 与重叠 | TODO | 45～60min | — | 未评估 | 未开始 | — |
 | 16 Graph | TODO | 45～60min | — | 未评估 | 未开始 | — |
 | 17 编译产物 | TODO | 45～60min | — | 未评估 | 未开始 | — |
@@ -590,3 +590,35 @@ Ch13 记 RUNNING，仅代表课程骨架和教学预检已准备；用户完成�
 将后续新增的用户GUI截图纳入验收证据：用户已打开原实验报告、选中第五次repeated_add，截图显示159.713μs的GPU条形及关联CPU调用；这更新了先前“个人GUI操作待补”的状态。截图不证明个人编译/采集、完成新报告Event标记定位或完整独立解释，实际GUI所在系统和版本也不从截图推定。Ch13仍RUNNING，辅助实现与工具验证由Codex完成，待用户个人程序运行/采集及完整复述；实际学习和本次文档整理耗时未记录。
 
 本次仅更新NOTE与RECORD，验证源码哈希、已有日志/CSV数据、文档链接和diff格式；未修改CUDA源码、重新编译、执行GPU、采集profiler或操作GUI，无新增临时文件。无计划偏离、新依赖或额外课程门槛，无需额外Claude审阅，未启动Claude、未提交或推送，保留已有工作区改动。
+
+## 2026-11-02：Ch14 Stream 内容生成与教学预检
+
+按用户“生成CH14内容”的要求，落实 PLAN 阶段 C 的同/不同 stream 独立双任务对照。新增 [CH14/streams.cu](../CH14/streams.cu) 和 [讲义](chapters/14_streams.md)，更新 PLAN 目录及变更记录、NOTE 阅读入口和本页。复用 Ch13 的逐元素累加，固定每任务 N=4099、float32、grid=17、block=256、每线程 8192 次加法；A/B 分别读写不同的 4099 项片段，只改变第二个 kernel 的目标 stream。两处学习 TODO 分别为创建显式 nonblocking stream 和将传入 stream 用作启动目标，正式源码及 build 保留练习。
+
+骨架提供全量 CPU double reference、NaN 漏写检查、stream 配置/路由检查、安全完成等待，以及 check/bench/trace 模式。计时从第一次 launch 前到两队列均等待完成后，分配、H2D、哨兵准备、D2H 和 CPU 校验在外；不把单队列 Event 当双队列总时长，不引入跨 stream Event、pinned copy 或流水。讲义给出先预测、两处修改、编译与工具命令、NSYS 最后两次 kernel 的定位和独立解释要求。
+
+本轮复核 GTX 1650 / CC 7.5 / 14 SM、concurrentKernels=1、KMD 610.88；设备属性显存约4095 MiB，nvidia-smi显示4096 MiB。NVCC 12.9.86、Compute Sanitizer 2025.2.1.0、NSYS 2026.4.1，CUDA_LAUNCH_BLOCKING unset。正式骨架及临时补全版编译无警告、无 spill，kernel 10 registers/thread、0 barriers。两版 same/split 各8198项全量数值 PASS、最大绝对误差0，memcheck（padding=32）均零错误。正式骨架 check/bench/memcheck 退出1，原因是练习未完成而拒绝实验计时；只补创建、只补路由的两个临时中间态也核验为数值 PASS、路由 INCOMPLETE、退出1。临时完整补全版 check/memcheck/bench/NSYS及导出均退出0。
+
+独立普通 bench：warmup=3、samples=21、batch=1，每样本一对 kernel，host_pair 中位数 same=177.898 μs、split=135.919 μs，包含 host 提交及等待开销，不把差值全部归因于并发。单独 NSYS 采集的两报告各10个kernel；目标为最后两次：same在stream13，Correlation ID=168/170，GPU持续69.276/69.020 μs，交集0，整对GPU跨度144.760 μs；split在stream13/14，Correlation ID=172/174，持续69.823/99.039 μs，交集65.919 μs，整对跨度102.943 μs。仅确认该次GPU区间重叠，不承诺固定加速或每SM的并发分布；不混算profiler与普通bench，不做跨CPU/GPU绝对时间的精确分解。
+
+原始命令、源码哈希、编译和运行输出、退出码及区间摘要见 [预检日志](../reports/CH14/preflight-2026-11-02.txt)。保留 [same NSYS](../reports/CH14/preflight-same-2026-11-02.nsys-rep)、[split NSYS](../reports/CH14/preflight-split-2026-11-02.nsys-rep)、对应SQLite与 [目标区间CSV](../reports/CH14/preflight-2026-11-02-timeline.csv)。报告来自临时完整补全版，未冒充正式TODO骨架；临时完整/中间态源码与可执行文件已清理。GUI、NCU、racecheck、synccheck NOT RUN；沿用ENVIRONMENT中已记录的GUI版本兼容提示，不新增安装任务。
+
+Ch14记RUNNING，仅代表骨架、讲义和教学预检已准备。用户代码完成部分尚无证据，两处TODO、个人运行/采集/读图，以及对同stream顺序、不同stream并发条件、host等待和SM关系的独立解释待验收。计划学习45～60分钟，实际学习与工程准备/agent执行耗时未记录；前章状态保留，无课程范围偏离或新依赖，无需额外Claude审阅，未启动Claude、未提交或推送。
+
+## 2026-11-02：Ch14 两处 TODO 正式补全与验证
+
+按用户明确要求完成TODO1和TODO2。`CH14/streams.cu` 的 `create_work_stream()` 现在通过 `cudaStreamCreateWithFlags(stream, cudaStreamNonBlocking)` 创建队列并返回状态；`launch()` 将传入 stream 用作 target，放入第四个启动参数，并返回实际队列供路由检查。移除源码中的两处TODO、占位与过时注释。未改kernel、shape、输入或计时边界，正式build已重编译。同步更新PLAN目录说明、NOTE阅读入口和讲义，原练习说明与历史临时版预检保留并标明历史状态。
+
+现场GTX1650 / CC7.5 / 14SM、KMD610.88、NVCC12.9.86、Compute Sanitizer2025.2.1.0，CUDA_LAUNCH_BLOCKING unset。正式编译无警告、无spill，kernel仍为10 registers/thread、0 barriers。same/split 的显式nonblocking配置、实际启动路由全部PASS，各8198项全量正确、最大绝对误差0；memcheck（padding=32）零错误。普通bench先校验、预热3次，再收集21个单次pair样本并逐样本回读校验，host_pair中位数same=173.116 μs、split=129.053 μs。所有编译、check、工具检查及bench命令退出0。
+
+命令、正式源码SHA-256和原始输出见 [正式补全日志](../reports/CH14/completed-2026-11-02.txt)，计时口径及结果见 [讲义](chapters/14_streams.md#正式补全与验证2026-11-02)。host_pair包含host提交与等待，不凭耗时证明GPU区间重叠；本轮NSYS、NCU、GUI、racecheck、synccheck均NOT RUN，历史临时版trace未冒充正式版新采集。本轮无临时补全产物、新依赖或计划偏离，无需额外Claude审阅，未启动Claude、未提交或推送。实现与验证由Codex完成，用户个人运行/读图和完整独立解释仍待验收，Ch14保持RUNNING；实际学习及工程执行耗时未记录。
+
+## 2026-11-02：Ch14 本章总结
+
+按用户“总结本章内容”的要求，在NOTE新增Ch14“今日完成任务、基本概念、踩坑记录、八股自测”完整复盘并更新阅读入口。围绕实际问题整理stream队列作用、s0/s1句柄与配置检查、flags查询/返回值、NonBlocking与legacy默认队列隐式同步、第四启动参数、run_pair数据分段/提交/等待/计时/返回值，以及默认队列内存活动和stream0与报告编号的区别。红色标签记录真实提问，mark突出核心结论；两处实现明确为Codex按要求代为完成，未扩展Ch15内容或额外验收门槛。
+
+重读正式源码、completed-2026-11-02日志、历史NSYS目标CSV及split SQLite。正式源码SHA-256与补全日志一致；既有same/split各8198项正确、误差0、memcheck零错误，普通bench host_pair中位数173.116/129.053μs。历史临时版trace目标区间的same交集0、整对跨度144.760μs；split交集65.919μs、跨度102.943μs，始终与正式普通计时分开陈述。已有split报告Memcpy/Memset活动均在streamId7，作为默认队列内存活动的只读核验，未冒充新采集或将它们视为kernel内部每次访存。
+
+纳入用户提供的NSYS GUI截图证据：可见Stream13/14的repeated_add、Default stream7的Memory活动，以及CPU CUDA API中的cudaMemcpy；这更新了个人GUI观察的证据。截图不证明个人编译/运行/采集、报告具体文件或GUI版本，也不证明完整独立解释已经通过。Ch14仍RUNNING，个人运行/采集与对队列顺序、并发条件、等待及默认stream关系的完整复述待验收，掌握度不据此上调。实际学习与本次文档整理耗时未记录。
+
+本次只更新NOTE与RECORD，核对现有证据、官方12.9语义、文档链接与diff格式；未修改CUDA源码、重编译、执行GPU或采集profiler，未新增临时产物。既有工作区改动保留，无计划偏离、新依赖或额外Claude审阅需要，未启动Claude、未提交或推送。
