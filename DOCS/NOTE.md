@@ -42,6 +42,14 @@
 
 阅读重点是同 stream 保序、不同 stream 的 CPU 提交顺序不能替代设备依赖，以及 stream 不固定对应 SM。host 在两个 launch 都提交后才依次等待两队列，等待 s0 不会阻止已经提交到 s1 的独立任务推进；实际是否并发由本次 GPU 时间线判断。普通 host_pair 覆盖提交与完成等待，不能当作单 kernel 的 GPU 时间。本页末尾的 Ch14 总结整理实际提问、两类实验数据和用户提供的 GUI 截图；个人实现与采集、完整独立解释仍待验收。跨 stream Event 和传输流水留到 Ch15。
 
+## Ch15 阅读入口（2026-11-02）
+
+[Event 与重叠讲义](chapters/15_event_pipeline.md) 从“下一块上传能否与当前块计算同时推进”开始。Event 是队列里的完成标记，另一条队列可以等标记后继续；pinned memory 是固定在内存中、供异步传输使用的 host 缓冲。骨架给出两个 device 槽位，交替处理 8 个独立数据块，块内仍保持 H2D→kernel→D2H 顺序。串行与流水只改变每块结束是否额外等待 CPU。
+
+两处练习已于 2026-11-03 按用户要求由 Codex 补全：`wait_for_input()` 用 `cudaStreamWaitEvent(compute, ready, 0)` 让计算队列等待输入就绪，`wait_for_slot()` 用 `cudaStreamWaitEvent(upload, done, 0)` 让上传队列等待旧槽位用完。两者均检查 API 状态后返回 true；设备依赖保留，CPU 不再在 helper 中等待 Event 完成。原骨架使用 CPU 等待占位，数值可以通过，但拒绝流水计时，该状态现已结束。阅读时沿块 0～2 区分 host 的独立片段与 device 的复用地址，解释 Record 提交、设备队列等待和 CPU 等待的差别。实现与工具验证由 Codex 完成，个人运行、读图或独立解释仍待验收，不据此补记用户掌握。
+
+2026-11-05 已补充 [正式实验与实际GPU时间线](chapters/15_event_pipeline.md#正式实验与流水证据2026-11-05)，本页末尾的 Ch15 总结整理本章真实提问、run_batch执行顺序、串行/流水的实际复述与实验读图。重点区分CPU提交与GPU执行、全程共用的stream与复用存储slot、同chunk的ready接力与跨chunk同槽位的done保护，以及NSYS采集数据与Python重绘图的来源。用户已有部分复述，实现与工具验证由Codex完成，个人运行/读图与完整独立解释仍待验收。
+
 ## 首轮贯穿的观察问题
 
 | 观察问题 | 将使用的程序证据 |
@@ -1351,3 +1359,142 @@ same中B在A结束后开始；split中A尚未结束，B在3.904μs已经开始�
 不看代码，解释s0/s1的创建、flags查询、第四个启动参数和cudaStreamSynchronize分别做什么；画出same/split中A/B的队列关系，说明为何B不读A的结果，以及为什么“先提交两个任务，再依次等队列”仍有并发机会。
 
 再结合173.116/129.053μs与NSYS的65.919μs重叠，分别说出两类数据能证明什么；指出GUI里的两个计算stream和默认stream内存活动，解释代码的stream0、报告ID7以及启动配置两个0的区别。以上用于后续独立验收，不扩展跨stream Event、pinned memory、传输流水或SM资源调优。
+
+## 2026-11-05 Ch15：Event 接力、双缓冲与流水执行
+
+### 今日完成任务
+
+围绕 [CH15/event_pipeline.cu](../CH15/event_pipeline.cu) 复盘chunk、slot、stream与Event的关系，按源码顺序解释run_batch，并用正式实验检验串行/流水对照。骨架于11月2日生成，两处TODO于11月3日按用户要求由Codex补全；今天结合用户真实疑问继续讲解，并由Codex运行正式版正确性、普通计时和两份NSYS采集，生成基于实际数据的对照图。用户已部分复述连续提交和槽位复用过程，尚无个人编译/采集或完整独立解释的验收证据；不将完整实现、工具通过或已看重绘图记为独立掌握。
+
+### 基本概念
+
+**本章的工作量与运行方式**
+
+<span style="color:red">用户提问：本次代码有哪几个模式？mode、selection、chunks、slots、N_per_chunk、block、grid等参数是什么意思？</span>
+
+第一个参数mode选择运行用途：check每种调度检查一批；bench先检查、预热3批，再测21批并报告中位数；trace先检查、预热3批，再运行一批目标样本，供外部nsys profile采集。第二个参数selection选择serial、pipeline或both，默认是check both。trace本身不启动profiler。当前两处练习已经补全，旧骨架数值正确但拒绝计时的INCOMPLETE状态仅是历史记录。
+
+| 配置 | 本例取值与含义 |
+| --- | --- |
+| chunks / slots | 每批8个独立数据块，轮流使用2套device存储 |
+| N_per_chunk / dtype | 每块262147个float32，每元素4字节 |
+| block / grid | 每次kernel为1025个block，每block256线程，最后block仅3个有效线程 |
+| repeats | 每个有效线程做256次+0.125，结果为输入加32，不是启动256次kernel |
+| bytes_per_copy | 每块一次H2D或D2H为1048588字节，约1MiB |
+
+chunk是host程序的数据划分，block是GPU线程组织；一个chunk由整个grid处理。kernel每线程只读写自己的一项，不在本章引入shared交换或block间合作。
+
+**chunk决定处理哪段数据，slot决定使用哪套显存地址**
+
+<span style="color:red">用户提问：chunk是在host划分的数据批块是什么意思？显存槽位slot干什么？host_input + offset怎么理解？</span>
+
+host_input一次分配8×262147个元素，逻辑上按连续范围分成8块，没有为每个chunk再分配一个host数组。offset=chunk*kN是当前块的元素起点；host_input+offset等价于&host_input[offset]，float指针会自动按每元素4字节移动，不能再把offset乘4。拷贝函数中的kBytes才以字节为单位。
+
+每个slot含input、output两块device显存以及ready、done两个Event，是本程序定义的数据结构，不是硬件执行槽。slot0和slot1各能承载一个完整chunk，按chunk%2复用：
+
+| chunk | host数据起点 | device槽位 | 槽位旧使用者 |
+| --- | --- | --- | --- |
+| 0 | host_input | slot0 | 无 |
+| 1 | host_input+kN | slot1 | 无 |
+| 2 | host_input+2*kN | slot0 | chunk0 |
+
+例如chunk2的block0/thread3读slot0.input[3]、写slot0.output[3]，回读到host_output[524297]。chunk0和chunk2的host地址不同，device地址却相同，因此覆盖前要保护旧块的使用期。<mark>两个slot各自都有输入和输出，轮流承担不同chunk；不是一个slot固定用于计算、另一个固定用于传输。</mark>
+
+**两条stream在整个程序中复用，不是每块新建两条**
+
+<span style="color:red">用户提问：upload和compute针对整个程序，还是每个chunk各有两个stream？slot与stream到底是什么关系？</span>
+
+main在循环外只创建一次upload和compute，全部chunk和后续run_batch都共用它们，最终才销毁。slot提供存储地址，stream组织操作顺序；upload负责两个slot的H2D，compute负责两个slot的kernel和D2H。不能把slot0绑定upload、slot1绑定compute，也不能从图中两行推断它们表示两个slot。
+
+同一stream按提交顺序执行，不同stream若无依赖可以独立推进。当前所有kernel和D2H在同一compute队列，因此多个chunk的kernel仍依次执行；本章观察的主要重叠是当前块kernel与下一块H2D。
+
+**memset按字节初始化，NaN用来暴露漏写**
+
+<span style="color:red">用户提问：std::memset(host_output, 0xff, kTotal*sizeof(float))为什么不是给float赋值255，为什么能帮助校验？</span>
+
+memset把指定范围的每个字节写为0xff。本例一个float占4字节，位模式成为0xffffffff，按本机float32解释为NaN；直接赋值255.0f则得到0x437f0000。这里先给host_output和两个slot.output写NaN哨兵，若kernel或回读漏写，后续可能保留NaN。validate计算误差后检查std::isfinite，非有限值直接计入mismatch，避免只做error>容差时漏掉NaN。两条stream的前序工作先等完，device哨兵填充也等完，才开始计时。
+
+**CPU等待、设备队列等待与Event完成标记**
+
+<span style="color:red">用户提问：cudaStreamSynchronize干什么？以前Event叫start/stop，现在ready该如何理解？</span>
+
+Event是某条队列工作完成进度的标记，start、stop、ready、done是变量名。start/stop用两个标记测时间，ready表示输入就绪，done表示本块计算及回读结束；本章用cudaEventDisableTiming创建ready/done，只需要依赖功能。
+
+| API | 本章中的作用 |
+| --- | --- |
+| cudaEventRecord(event, stream) | 把该stream在调用时已提交工作的完成状态记录到event，CPU返回不代表这些工作已经完成 |
+| cudaStreamWaitEvent(stream, event, 0) | 约束目标stream后续工作，等该event覆盖的工作完成；CPU无需先等event完成才继续提交 |
+| cudaEventSynchronize(event) | CPU等该event覆盖的工作完成，本章serial每块结束时使用 |
+| cudaStreamSynchronize(stream) | CPU等该stream此前工作完成，本章用于批次准备和最终收尾 |
+
+同stream本身保证先后；跨stream需要明确建立依赖。CPU等待一个stream时，另一个已提交工作的stream仍可推进。CUDA_CHECK检查API状态，失败会终止程序；它本身不是同步机制。
+
+**ready连接同一chunk的上传与计算，done保护同槽位复用**
+
+<span style="color:red">用户提问：Record(ready, upload)与wait_for_input(compute, ready)的先后关系是什么？这两句是不是两个chunk在同一slot上的交接？</span>
+
+```cpp
+cudaMemcpyAsync(slot.input, host_input + offset, kBytes,
+                cudaMemcpyHostToDevice, upload);
+cudaEventRecord(slot.ready, upload);
+wait_for_input(compute, slot.ready);  // 内部为cudaStreamWaitEvent
+repeated_add<<<grid, kBlock, 0, compute>>>(slot.input, slot.output, kN);
+```
+
+CPU先提交H2D和ready，再给compute设置等待，最后提交kernel；CPU不必等上传完成才调用wait。设备端顺序为H2D完成→ready完成→kernel开始。<mark>ready是同一chunk从upload到compute的阶段接力；done才是旧chunk向复用同一slot的新chunk交出空间。</mark>
+
+chunk0的kernel之后，在同一compute队列提交D2H，再Record(slot0.done)。提交chunk2的H2D之前，upload先通过wait_for_slot等待旧done，防止覆盖chunk0仍在使用的slot0。前两个chunk首次使用槽位，没有旧工作，不依赖尚未record的done。Event重录会更新状态，已提交的Wait绑定调用时最近一次Record覆盖的工作，不会被后续重录改成等待未来一轮。
+
+**Async允许CPU继续提交，同stream仍然保序**
+
+<span style="color:red">用户提问：为什么使用cudaMemcpyAsync？kernel之后直接回读，为何不用再加Event？</span>
+
+本程序用cudaMallocHost分配pinned host内存，为异步传输提供条件；cudaMemcpyAsync把任务提交到指定stream，使CPU不必逐次等传输完成再提交后续工作。API名字不保证所有情形都立即返回，也不保证实际一定重叠。
+
+kernel写slot.output，随后的D2H也提交到compute，因此GPU执行时自然满足整个kernel完成→D2H开始。<mark>Async涉及CPU返回与工作完成的关系，不会取消同stream顺序。</mark>CPU提交D2H时kernel可以还在执行，但D2H排在其后；CPU最终读取host_output前，仍需等待回读完成。cudaGetLastError是CPU查询错误状态，不是加入GPU队列的一项计算或拷贝任务。
+
+**run_batch的顺序、唯一对照开关与布尔返回值**
+
+<span style="color:red">用户提问：按逻辑顺序逐行解释run_batch；串行和流水是不是只差第91行？为什么最后返回device_waits，helper又指什么？</span>
+
+run_batch先等待前序工作并写NaN哨兵，再记t0。每轮选择slot和host偏移，需要复用时先保护旧槽位，随后提交H2D→ready→compute等待→kernel→D2H→done。循环后等待两条stream完成，再记t1，把微秒数写入引用参数host_us。输入生成、分配、哨兵和CPU校验均在计时外。
+
+```cpp
+if (!pipeline) CUDA_CHECK(cudaEventSynchronize(slot.done));
+```
+
+这行是唯一调度对照：serial让CPU每块等完，pipeline连续提交并最终统一等待。用户已复述chunk0尚未全结束就提交chunk1、chunk2要复用slot0时需等chunk0。进一步需要区分：<mark>chunk2的CPU代码可以提前提交等待与上传；真正的新H2D必须等旧done完成，CPU不必在wait_for_slot中停住。</mark>
+
+helper只是自写的辅助函数，此处指wait_for_input和wait_for_slot。device_waits用逻辑与累计helper完成声明；原骨架helper安全地让CPU等待但返回false，从而拒绝发布流水计时。现在两处均正确调用StreamWaitEvent、成功后返回true；API失败由CUDA_CHECK终止，因此该bool主要保留教学检查接口。调用方将waits_ok与validate得到的correct组合，不能把device_waits当数值正确、GPU已完成或并发已发生的证明。
+
+**实际实验分别回答“是否更快”和“是否重叠”**
+
+<span style="color:red">用户提问：给我实际实验结果，并说明如何体现本章的流水模式。</span>
+
+11月5日正式版在GTX1650上，两种调度各2097176项全部正确、最大误差0。普通bench预热3批、测21批，每批8块；串行host_batch中位数4473.431μs，流水3000.325μs，耗时减少32.930%，串行/流水耗时比约1.491。这是本机本轮的整批host时间，包含提交、传输、计算和等待，不是单kernel GPU时间。
+
+另外两次NSYS采集各40次kernel、40次H2D和40次D2H，最后8次各类活动对应目标批次。串行7对“当前kernel/下一块H2D”无交集，流水7对都有交集，总和617.060μs。以流水kernel0和H2D1为例，分别位于234.145～326.082μs与161.761～321.762μs，交集87.617μs，直接显示slot0计算与slot1上传同时推进。
+
+旧D2H0结束于543.843μs，新H2D2开始于610.372μs；全部8块的块内先后和6次槽位复用端点检查均符合依赖。两份trace均有70次StreamWaitEvent，额外CPU EventSynchronize为serial40、pipeline0，对应5批×8块的开关差异。<mark>流水保留同块与同槽位的必要顺序，利用不同块之间的独立性；创建两条stream、数值PASS或耗时下降，单独都不能证明发生了重叠。</mark>
+
+普通bench与NSYS属于不同运行。目标GPU整批跨度4635.592/3097.683μs、交集617.060μs，不能与普通host中位数相加、相减或互相替代。详细端点、计时边界和原始报告见 [本章正式实验](chapters/15_event_pipeline.md#正式实验与流水证据2026-11-05) 与 [目标活动CSV](../reports/CH15/experiment-2026-11-05-timeline.csv)；11月3日同哈希源码memcheck零错误是既有证据，11月5日没有重跑该工具。
+
+**对照图的数据来源与原始NSYS报告**
+
+<span style="color:red">用户提问：这张时间线图是NSYS本来就有的，还是你自己生成的？</span>
+
+[对照PNG](../reports/CH15/experiment-2026-11-05-timeline.png)由Codex用Python/Matplotlib生成：NSYS采集.nsys-rep→导出SQLite→提取目标批次GPU起止时间和stream ID→按实测区间绘图。矩形位置、宽度与交集取自采集数据；颜色、H/K/D标签、chunk编号及上下对照布局由 [脚本](../reports/CH15/experiment-2026-11-05-analysis.py)添加，chunk编号按同类活动在各队列的顺序对应。它不是NSYS GUI截图；每份报告分别以首个目标H2D归零，不把两次采集拼成同一绝对时间轴。
+
+原始 [串行报告](../reports/CH15/experiment-serial-2026-11-05.nsys-rep) 与 [流水报告](../reports/CH15/experiment-pipeline-2026-11-05.nsys-rep)均保留。用户查看并询问重绘图的来源，不据此推断已经打开NSYS GUI、亲自采集或完成完整读图验收。
+
+### 踩坑记录
+
+本章真实疑问包括：chunk与block的层次区别、两个slot是否固定分担计算/传输、每个chunk是否另建两条stream、ready是否负责两个chunk的槽位交接，以及chunk2复用slot0时究竟由CPU还是GPU队列等待。已沿chunk0～2的地址、队列和Event链解释；不将试探性提问记成已经确认的错误理解，也不把已讲解等同于独立掌握。
+
+需要反复分清字节写入与float数值赋值、CPU等待与设备依赖、Record返回与Event完成、错误查询与任务排队、教学bool与正确性校验。数值PASS和memcheck零错误不独立证明跨stream依赖充分；实际端点与源码语义共同构成解释依据。所有kernel仍在compute中顺序执行，不能把本章结果说成多个kernel并发，也不预设其他GPU或每次运行都获得相同加速。
+
+### 八股自测
+
+不看答案，沿chunk0、chunk1、chunk2说明host数组范围、slot复用、upload/compute中的提交顺序，以及ready和done分别由谁记录、谁等待；解释CPU什么时候可以继续提交、GPU什么时候允许读输入或覆盖slot0，以及为什么同stream的kernel→D2H不需要额外Event。
+
+再用实际图里的K0/H1重叠与D0/H2先后，分别解释并发机会与槽位保护；说明4.473/3.000ms普通host时间、87.617μs单对交集和GPU整批跨度各测了什么，并指出哪些图形标注来自脚本、哪些时间来自NSYS。以上用于后续独立验收，不追加三阶段完全并发、CPU线程池或Graph改造。

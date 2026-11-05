@@ -157,7 +157,8 @@ CH11/                                       # occupancy 查询及 dynamic shared
 CH12/                                       # 单层 FP32 tiled GEMM 两处练习已按要求补全，个人解释待验收
 CH13/                                       # Host 等待练习已按要求补全，个人运行与解释待验收
 CH14/                                       # stream 创建与启动路由均已按要求补全，个人运行与解释待验收
-CH15/ ... CH19/                              # 按需创建
+CH15/                                       # Event 接力两处等待已按要求补全，个人运行与解释待验收
+CH16/ ... CH19/                              # 按需创建
 common/                                      # 逐步提取的检查、计时 helper
 scripts/                                     # 按需新增 env/profile/export 脚本
 DOCS/chapters/XX_topic.md                     # 一章一份简短任务和实验记录
@@ -212,3 +213,4 @@ Reference 查参数、错误与同步语义，Programming Guide 查执行机制�
 | 2026-10-28 | 准备 Ch12 单层 FP32 tiled GEMM 骨架、讲义与教学预检 | 用户明确要求“生成CH12内容”；固定 16×16 block 与主 shape，比较 naive 与 shared 复用，保留装载/累加两处 TODO；非整除尺寸仅校验边界，NCU 为可选对照，不引入 cuBLAS、Roofline、Tensor Core 或多层 tiling，不补记前章完成 |
 | 2026-10-28 | 准备 Ch13 Host 异步骨架、计时边界讲义及 NSYS 预检 | 用户明确要求“生成CH13内容”；固定同一次向量运算，对照 CPU launch 段、CPU 到完成边界与同 stream Event，保留一处 host 等待 TODO；不引入多 stream 或拷贝重叠，不补记前章完成 |
 | 2026-11-02 | 准备 Ch14 同/不同 stream 的独立双任务骨架、讲义与 NSYS 预检 | 用户明确要求“生成CH14内容”；仅改变第二个 kernel 的目标 stream，保留 stream 创建与启动路由两处 TODO；host 计时等待两队列完成，GPU 重叠由独立 trace 核对，不引入跨 stream Event、pinned memory 或流水，不补记前章完成 |
+| 2026-11-02 | 准备 Ch15 Event 接力、pinned copy 与双缓冲流水骨架、讲义及 NSYS 预检 | 用户明确要求“生成CH15内容”；两个 device 槽位交替处理 8 个独立块，仅对照每块是否额外 CPU 等待，保留输入就绪与槽位复用两处设备等待 TODO；整批 host 计时包含传输，用 GPU timeline 核对依赖与重叠，不扩展三阶段流水、Graph 或前章验收 |

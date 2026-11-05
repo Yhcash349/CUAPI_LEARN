@@ -25,7 +25,7 @@
 | 12 数据复用 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、两处 TODO 补全、验证及讲解总结 | 正式版两种 shape 全量校验、三种 Sanitizer 与 Event 通过；历史 NCU 对照保留；用户已正确复述固定输出与沿 K 分块累加，个人运行及同步/尾部/缓存边界的完整独立解释待验收 |
 | 13 Host 异步 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、TODO 补全、验证、计时及GUI讲解总结 | 正式数值、完成边界、memcheck、计时及NSYS关联通过；用户已提供GUI截图并定位第五次kernel，个人程序运行/采集及完整独立解释待验收 |
 | 14 Stream | RUNNING | 45～60min | — | 未评估 | Codex 骨架、讲义、两处 TODO 补全、验证与总结 | 正式版same/split配置/路由、8198项全量数值、memcheck与计时通过；历史临时版NSYS对照及用户双stream/默认stream GUI截图已有证据；个人运行/采集与完整独立解释待验收 |
-| 15 Event 与重叠 | TODO | 45～60min | — | 未评估 | 未开始 | — |
+| 15 Event 与重叠 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、讲义、两处 TODO 补全、验证、讲解与总结 | 正式版全量数值、既有memcheck、普通计时及2026-11-05正式NSYS对照通过；用户已部分复述连续提交与槽位复用，stream/slot和ready/done关系及重绘图来源已讲解；个人运行/读图与完整独立解释待验收 |
 | 16 Graph | TODO | 45～60min | — | 未评估 | 未开始 | — |
 | 17 编译产物 | TODO | 45～60min | — | 未评估 | 未开始 | — |
 | 18 Driver | TODO | 45～60min | — | 未评估 | 未开始 | — |
@@ -622,3 +622,51 @@ Ch14记RUNNING，仅代表骨架、讲义和教学预检已准备。用户代码
 纳入用户提供的NSYS GUI截图证据：可见Stream13/14的repeated_add、Default stream7的Memory活动，以及CPU CUDA API中的cudaMemcpy；这更新了个人GUI观察的证据。截图不证明个人编译/运行/采集、报告具体文件或GUI版本，也不证明完整独立解释已经通过。Ch14仍RUNNING，个人运行/采集与对队列顺序、并发条件、等待及默认stream关系的完整复述待验收，掌握度不据此上调。实际学习与本次文档整理耗时未记录。
 
 本次只更新NOTE与RECORD，核对现有证据、官方12.9语义、文档链接与diff格式；未修改CUDA源码、重编译、执行GPU或采集profiler，未新增临时产物。既有工作区改动保留，无计划偏离、新依赖或额外Claude审阅需要，未启动Claude、未提交或推送。
+
+## 2026-11-02：Ch15 Event 与重叠内容生成及教学预检
+
+按用户“生成CH15内容”的要求，落实 PLAN 阶段 C。新增 [CH15/event_pipeline.cu](../CH15/event_pipeline.cu) 与 [讲义](chapters/15_event_pipeline.md)，更新 PLAN 目录/变更记录、NOTE 阅读入口及本页。固定 8 个独立数据块、每块 N=262147、float32、block=256、grid=1025，每项加 256 次 0.125；两个 device 槽位交替处理，upload stream 做 H2D，compute stream 做 kernel 和 D2H。两种调度仅改变每块结束是否额外让 CPU 等待 done，保留块内 H2D→kernel→D2H 依赖，不扩展为三阶段完全并发流水。
+
+Codex 提供 pinned host 缓冲、双缓冲分配与生命周期、Event 记录、全量 CPU double reference、NaN 哨兵、check/bench/trace 模式、计时与清理。正式源码保留 compute 等 ready、upload 等旧 done 两处 TODO；未补时使用安全的 CPU 等待占位，仍可检查数值，但返回未完成状态并拒绝计时。讲义从块 0～2 和具体线程说明跨 stream 接力、同槽覆盖保护、Event 重录及 pinned memory 条件，限定 45～60 分钟；未批量生成后章或将预检记作用户掌握。
+
+现场复核 GTX 1650 / CC7.5 / 14SM、asyncEngineCount=2、concurrentKernels=1、KMD610.88、NVCC12.9.86、Compute Sanitizer2025.2.1.0、NSYS2026.4.1，CUDA_LAUNCH_BLOCKING unset。正式骨架及临时补全版编译无警告、无 spill，ptxas 报告 kernel 为8 registers/thread、0 barriers。两版 serial/pipeline 各全量检查2097176项，数值PASS、最大绝对误差0；memcheck（padding=32）均零错误。正式骨架 check/bench/memcheck 退出1，这是两处练习保留导致的预期应用状态，非工具检出内存错误。临时补全版只将两个 helper 改为检查 cudaStreamWaitEvent(target,event,0) 并返回true，check/memcheck/bench/两份NSYS采集及导出均退出0。
+
+临时版独立普通 bench：warmup=3、samples=21、每样本8块，host_batch 中位数 serial=4481.916μs、pipeline=2990.141μs。范围从本批首次提交前到两条队列均完成后，含H2D、kernel、D2H、Event操作及host提交/等待；分配、输入、哨兵和CPU校验在外。该差值不全部归因于设备端重叠，不与profiler时间混算。两份NSYS各40次kernel、40次H2D、40次D2H，目标为各类最后8次；upload/compute的stream ID为13/14。串行的下一块H2D与当前kernel交集为0，流水7对均有交集、总和632.193μs；目标GPU整批跨度分别4743.324/3654.726μs。所有块内先后和6次槽位复用端点检查通过。两份trace各70次StreamWaitEvent，额外CPU EventSynchronize次数为serial40、pipeline0，符合唯一开关。仅确认本次trace实际重叠，不承诺每次或所有GPU都加速。
+
+命令、源码SHA-256、编译/运行原始输出、退出码和区间摘要见 [预检日志](../reports/CH15/preflight-2026-11-02.txt)，保留 [serial NSYS](../reports/CH15/preflight-serial-2026-11-02.nsys-rep)、[pipeline NSYS](../reports/CH15/preflight-pipeline-2026-11-02.nsys-rep)、对应SQLite和 [目标区间CSV](../reports/CH15/preflight-2026-11-02-timeline.csv)。nsys stats读取rep时因已有SQLite时间戳检查退出1，改为直接读取导出的SQLite后成功、退出0；未覆盖证据。profiler与性能数据均来自临时补全版，正式源码/build保留练习。临时源码、可执行文件与路径指示文件已清理，GUI、NCU、racecheck、synccheck NOT RUN；memcheck零错误不冒充跨stream竞争证明。
+
+Ch15保持RUNNING，用户代码完成部分尚无证据，两处补全、个人运行/读图及独立解释待验收；前章状态不变。实际学习和工程准备/agent执行耗时未记录，无新依赖、计划偏离或额外Claude审阅需要，未启动Claude、未提交或推送。
+
+## 2026-11-03：Ch15 两处 TODO 正式补全与验证
+
+按用户“完成TODO1和TODO2”的明确要求，修改 [CH15/event_pipeline.cu](../CH15/event_pipeline.cu)：`wait_for_input()` 检查 `cudaStreamWaitEvent(compute, ready, 0)`，`wait_for_slot()` 检查 `cudaStreamWaitEvent(upload, done, 0)`，均在成功后返回 true。移除两处源码 TODO 和 CPU 等待占位，补充中文依赖注释；保留 serial 每块结束后的额外 CPU 等待和整批最终等待，kernel、shape、双缓冲和计时范围不变。同步更新 PLAN 目录说明、NOTE 阅读入口、讲义和本页；历史生成预检保留并与当前状态区分。
+
+现场复核 GTX1650 / CC7.5 / 14SM、asyncEngineCount=2、concurrentKernels=1、KMD610.88、NVCC12.9.86、Compute Sanitizer2025.2.1.0，CUDA_LAUNCH_BLOCKING unset。正式源码重编译无警告、无 spill，ptxas 为8 registers/thread、0 barriers。serial/pipeline 的设备等待完成状态及各2097176项全量数值检查全部PASS，最大绝对误差0；memcheck（padding=32）零错误。编译、check、memcheck、bench命令均退出0，正式build已对应补全后的源码。
+
+普通bench先校验、预热3批，再测21批并逐批在计时外校验，每批8块，host_batch中位数serial=4410.856μs、pipeline=2938.147μs。时间包含H2D、kernel、D2H、Event操作和host提交/等待，不当作单kernel GPU时间，不凭耗时单独证明重叠，也不把与历史临时版的差异解释成性能A/B。原始命令、正式源码SHA-256、输出和退出码见 [正式补全日志](../reports/CH15/completed-2026-11-03.txt)。本轮NSYS、NCU、GUI、racecheck、synccheck均NOT RUN，历史临时版NSYS不冒充正式版新采集；memcheck不替代跨stream依赖语义检查。
+
+两处实现及验证由Codex完成，个人运行/读图与完整独立解释待验收，Ch15仍RUNNING，掌握度未据此提高。实际学习及工程执行耗时未记录，无新增临时实现文件、新依赖、计划偏离或额外Claude审阅需要，未启动Claude、未提交或推送，保留既有工作区改动。
+
+## 2026-11-05：Ch15 正式实验、流水时间线与证据解释
+
+按用户要求提供实际实验结果，并解释结果如何体现本章流水模式。本次使用当前正式源码，SHA-256仍为f0621f86436a9fe2f93b06583e08f376022d63a24cdcffa753fd686f8ce57d10，与11月3日补全版一致；重新编译无警告、无spill，ptxas为8 registers/thread、0 barriers。现场GTX1650 / CC7.5 / 14SM、asyncEngineCount=2、concurrentKernels=1、KMD610.88、NVCC12.9.86、NSYS2026.4.1，CUDA_LAUNCH_BLOCKING unset；固定8块、每块262147个float32、两个slot、block256、grid1025、每项256次加法、单次拷贝1048588字节。两种调度各2097176项全量数值PASS、最大绝对误差0，普通bench先校验、预热3批、测21批并逐批校验，host_batch中位数serial=4473.431μs、pipeline=3000.325μs；本轮耗时减少32.930%，耗时比1.491。该范围含提交、H2D/kernel/D2H、Event操作及完成等待，哨兵、分配和CPU校验在外。
+
+普通bench之外，分别采集当前正式build的serial/pipeline NSYS，各40次kernel、40次H2D、40次D2H，提取各类最后8次对应目标批次。上传stream13、计算及D2H stream14；serial中7对“下一块H2D/当前块kernel”均无交集，pipeline中7对均有交集，依次87.617/78.336/91.296/91.744/91.201/91.265/85.601μs，合计617.060μs。GPU目标整批跨度分别4635.592/3097.683μs，属于独立profiler运行，不与普通bench时间混算。
+
+各报告分别以目标批次第一个H2D开始为零：pipeline的kernel0区间234.145～326.082μs（Correlation416），H2D1区间161.761～321.762μs（Correlation420），交集87.617μs，直接显示slot0计算与slot1上传同时推进。serial的kernel0区间202.783～292.574μs，H2D1区间554.717～714.556μs，无交集。pipeline的旧D2H0结束543.843μs，新H2D2开始610.372μs；两模式全部8块均满足H2D结束≤kernel开始、kernel结束≤D2H开始，6次同槽复用均满足旧D2H结束≤新H2D开始。端点观察与源码ready/done链相符，不把单次图当成完整同步证明，也不把重叠区间合计等同整批耗时节省。
+
+两份完整trace各70次cudaStreamWaitEvent，serial额外40次cudaEventSynchronize、pipeline为0，符合逐块CPU等待开关；kernel和D2H始终在同一compute队列，未宣称多个kernel并发。结合用户本轮问题，讲义与NOTE区分了固定两条全程复用的stream、两套存储地址slot、同chunk的ready接力，以及跨chunk同slot复用的done保护。
+
+正式命令、版本、源码哈希、编译/运行/采集/导出输出及退出码见 [实验日志](../reports/CH15/experiment-2026-11-05.txt)。保留 [serial报告](../reports/CH15/experiment-serial-2026-11-05.nsys-rep)、[pipeline报告](../reports/CH15/experiment-pipeline-2026-11-05.nsys-rep)、对应SQLite、[目标区间CSV](../reports/CH15/experiment-2026-11-05-timeline.csv)、[摘要JSON](../reports/CH15/experiment-2026-11-05-summary.json)、[提取绘图脚本](../reports/CH15/experiment-2026-11-05-analysis.py) 和 [实际时间线PNG](../reports/CH15/experiment-2026-11-05-timeline.png)/同名SVG。图形矩形来自原始GPU端点，两个报告分别归零，非示意比例图。所有本轮运行/采集/导出命令退出0；未改CUDA源码、未覆盖历史报告，无无效临时文件、新依赖或计划偏离，无额外Claude审阅需要。GUI、NCU、memcheck、racecheck、synccheck本轮NOT RUN；11月3日同哈希源码memcheck零错误保持为既有证据。
+
+实验及图形由Codex执行和生成，不计用户独立操作或掌握；用户对连续提交及槽位复用已有部分复述，CPU/GPU等待、stream与slot、ready与done交接已进一步讲解，完整独立解释仍待验收。Ch15保持RUNNING，实际学习与工程执行耗时未记录，未启动Claude、未提交或推送。
+
+## 2026-11-05：Ch15 今日学习总结
+
+按用户“总结今天的本章内容”的要求，更新NOTE的Ch15阅读入口，并新增“今日完成任务、基本概念、踩坑记录、八股自测”完整复盘。覆盖运行模式与配置、chunk/slot/block的区别、host指针偏移、两个全程共用的stream、NaN哨兵、pinned memory与异步拷贝、CPU/设备等待、Event与start/stop/ready/done命名、两处helper、run_batch逻辑及唯一串行开关、同stream的kernel→D2H顺序、device_waits教学返回值。红色问题标签保留用户真实提问，mark突出关键结论，不扩展后章或新必修内容。
+
+对照当前正式源码及11月3日补全日志、今日实验日志/摘要JSON/目标CSV核对数据：源码SHA-256一致，今日普通host_batch中位数4473.431/3000.325μs，耗时降低32.930%；NSYS目标GPU跨度4635.592/3097.683μs，串行0/7和流水7/7上传/计算交集，流水交集总和617.060μs。kernel0与H2D1交集87.617μs，D2H0结束543.843μs、新H2D2开始610.372μs，分别说明不同slot重叠与同slot复用保护。保留普通计时、profiler和既有memcheck的证据边界，未把这些历史执行冒充本次文档整理时重新运行。
+
+明确对照PNG是Codex用Matplotlib从NSYS SQLite原始GPU区间重绘：位置/宽度来自实测，颜色、chunk标签和布局由脚本添加，不是NSYS GUI截图。用户已部分复述连续提交与chunk2复用slot0的过程，并查看/询问重绘图，但没有据此认定个人编译、采集、NSYS GUI交互或完整独立解释通过。两处实现和实验执行均由Codex完成，Ch15仍RUNNING，掌握度未上调；实际学习与文档整理耗时未记录。
+
+本次仅修改NOTE与RECORD，核对源码哈希、既有日志/JSON/CSV的数值与端点、文档链接及diff格式；未修改CUDA源码、重新编译、执行GPU或重新采集profiler，没有新增临时文件。无计划偏离、新依赖或额外Claude审阅需要，未启动Claude、未提交或推送，保留既有工作区改动。
