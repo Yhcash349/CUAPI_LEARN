@@ -50,6 +50,14 @@
 
 2026-11-05 已补充 [正式实验与实际GPU时间线](chapters/15_event_pipeline.md#正式实验与流水证据2026-11-05)，本页末尾的 Ch15 总结整理本章真实提问、run_batch执行顺序、串行/流水的实际复述与实验读图。重点区分CPU提交与GPU执行、全程共用的stream与复用存储slot、同chunk的ready接力与跨chunk同槽位的done保护，以及NSYS采集数据与Python重绘图的来源。用户已有部分复述，实现与工具验证由Codex完成，个人运行/读图与完整独立解释仍待验收。
 
+## Ch16 阅读入口（2026-11-05）
+
+[Graph 讲义](chapters/16_graph_replay.md) 从“同样的三个小 kernel 能否少提交几次”开始。固定 input→加 1→乘 2→减 0.5→output 的链，每批重复 64 条；direct 每条分别启动三个 kernel，graph 将提前录好的链一次提交。Graph 是把固定工作及依赖先描述好再重放，capture 负责记录，实例化得到可启动对象，replay 才提交执行；GPU 上仍然是三个 kernel，不自动融合。
+
+两处练习已于2026-11-06按用户要求由Codex补全：capture_chain在stream上开始capture、录入launch_chain、结束capture得到graph，再实例化得到exec；replay_chain用cudaGraphLaunch提交exec，整批完成等待仍由run_batch负责。host、计算、校验和计时同样由Codex提供。沿thread3和tmp0/tmp1解释先写后读，同一stream保序，固定地址要保持有效到最后一次replay完成。阅读时分清CPU提交时间、host等待完成时间和含间隙的Event区间，一次性建图不在稳态计时内。原骨架的安全回退与拒绝Graph计时已成为历史状态；临时预检与正式补全验证分列在讲义中，均不替代个人运行或独立解释。
+
+2026-11-09补充 [正式版NSYS间隙对照与GUI阅读路线](chapters/16_graph_replay.md#正式-nsys-间隙对照与-gui-阅读路线2026-11-09)。同一批192个kernel的执行耗时合计相近，普通/Graph链内间隙中位数为2.016/0.320μs，目标区间没有memcpy/memset；这体现工作提交与执行衔接的变化，不能把所有间隙都归成H2D拷贝开销。重点看CUDA HW的GPU色块端点，CPU CUDA API行用于看逐kernel提交与Graph提交，不能互换计时含义。图由NSYS SQLite实测端点重绘，非GUI截图；原始报告保留，Graph仍存在链间间隙。本页末尾的Ch16总结整理本章实际提问、API流程、指针/句柄、节点检查、三种计时与正式实验，个人读图与独立解释待验收。
+
 ## 首轮贯穿的观察问题
 
 | 观察问题 | 将使用的程序证据 |
@@ -1498,3 +1506,133 @@ helper只是自写的辅助函数，此处指wait_for_input和wait_for_slot。de
 不看答案，沿chunk0、chunk1、chunk2说明host数组范围、slot复用、upload/compute中的提交顺序，以及ready和done分别由谁记录、谁等待；解释CPU什么时候可以继续提交、GPU什么时候允许读输入或覆盖slot0，以及为什么同stream的kernel→D2H不需要额外Event。
 
 再用实际图里的K0/H1重叠与D0/H2先后，分别解释并发机会与槽位保护；说明4.473/3.000ms普通host时间、87.617μs单对交集和GPU整批跨度各测了什么，并指出哪些图形标注来自脚本、哪些时间来自NSYS。以上用于后续独立验收，不追加三阶段完全并发、CPU线程池或Graph改造。
+
+## 2026-11-09 Ch16：CUDA Graph 与固定小 kernel 链
+
+### 今日完成任务
+
+围绕 [CH16/graph_replay.cu](../CH16/graph_replay.cu) 复盘固定三阶段链的capture、实例化和replay，以及Graph为什么能减少提交和执行间隙。骨架11月5日生成，11月6日按用户要求由Codex补全两处TODO并验证；本章已结合用户提问解释参数、输出指针、Graph句柄、capture函数、节点数量与类型检查、正式计时和NSYS时间线。11月9日由Codex采集当前正式版两种模式的NSYS并生成实测对照图，本次总结只核对已有源码、日志及摘要，没有重新运行实验。
+
+用户主动追问过指针地址与H2D开销，并要求逐行讲解和实测对照；这些是实际学习接触，不等同于独立实现或完整解释通过。代码补全、编译、校验、memcheck、采集及绘图由Codex完成，尚无个人运行/采集或完整独立解释的验收证据。
+
+### 基本概念
+
+**一条链做什么，参数控制哪一层**
+
+<span style="color:red">用户提问：简介本章学习目的；介绍一下本章参数。</span>
+
+输入依次经过三个GPU kernel：input→add_one写tmp0→scale_two写tmp1→subtract_half写output，每项结果为(input+1)×2−0.5。CPU函数launch_chain负责提交这三个启动请求，三个kernel都在同一stream中，按先写后读的依赖顺序执行。例如block0/thread3负责第3项，依次从−6.6875得到−5.6875、−11.375和−11.875。
+
+| 参数 | 本例值与作用 |
+| --- | --- |
+| Clock | steady_clock，用于CPU侧计时 |
+| kN / dtype | 每个数组4099个float32 |
+| kBlock / kGrid | 每block256线程、每次启动17个block，共4352线程，最后block仅3个有效线程 |
+| kChains | 每批重复64条三kernel链，共192个GPU kernel |
+| kWarmup / kSamples | bench先预热3批，再测21批并分别取时间中位数 |
+| kBytes | 单个数组16396字节，用于分配与拷贝；四个device数组各占这么多 |
+
+64条链复用同一组input/tmp0/tmp1/output，每条都从原input重新计算，覆盖中间数组与output，不把上一条output再累积一轮。64条链不是64套输入，也不等于64个block。唯一实验变量是普通逐kernel提交或Graph replay，数据、计算、地址与依赖不变。
+
+**capture记录工作，实例化准备执行，replay提交工作**
+
+<span style="color:red">用户提问：逐行讲解capture_chain。</span>
+
+```cpp
+cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
+launch_chain(b, stream);
+cudaStreamEndCapture(stream, &graph);
+cudaGraphInstantiate(&exec, graph, 0);
+// 后续需要运行时：
+cudaGraphLaunch(exec, stream);
+```
+
+以上摘录省略CUDA_CHECK，正式源码每个API均检查状态。BeginCapture让指定stream进入记录状态；CPU仍执行launch_chain的C++代码，但三个kernel启动被录为节点及其依赖，此时不排队执行这条链。EndCapture结束记录并取得graph；Instantiate检查和准备图，生成exec，最后一个0为默认flags；GraphLaunch才将可执行图提交到stream。replay不会重新走一遍launch_chain的host代码。Global是capture约束模式，不表示自动捕获所有stream或使用global memory。
+
+<mark>graph是工作及依赖的描述，exec是可重复启动的对象；capture/实例化成功、GraphLaunch返回和GPU执行完成是不同事件。</mark> 两个helper返回true只表示相应API成功，完成等待在run_batch整批末尾。分配、输入上传、预热、哨兵、同步和计时留在capture外；尤其不能在capture中同步正在捕获的stream。图保留参数中的地址，相关device分配要活到最后一次replay完成。本章保持地址、shape和参数固定，不扩展图更新或跨stream捕获。
+
+**为什么传&b.input，以及句柄为什么可以初始化为nullptr**
+
+<span style="color:red">用户提问：b.input是一个指针，&b.input不是这个指针变量的地址吗？为什么不能直接赋值给b.input？第一次解释后又表示“没明白，再讲一下”。</span>
+
+b.input是CPU中的一个指针变量，变量本身有存放位置，其值以后指向GPU显存。以假设地址说明：变量存放在CPU地址0x1000，最初里面是nullptr；cudaMalloc分到显存地址0x8000后，需要把0x8000写进CPU地址0x1000处的变量。因而传&b.input，让API知道把结果填进哪个变量；只传b.input，拿到的只是当前nullptr值。这里的0x1000/0x8000是教学假设，不是本次运行实测地址。
+
+<mark>cudaMalloc的返回值是成功或失败状态，显存地址通过第一个参数写回；CUDA_CHECK检查状态，b.input接收地址。</mark> 最终确实修改了b.input，只是写回发生在API内部。变量中存放的地址与变量本身的地址要分开理解；第二次解释使用CPU盒子/GPU空间示意，未据此记录用户已经独立掌握。
+
+<span style="color:red">用户提问：cudaGraph_t graph和cudaGraphExec_t exec是干嘛的，为什么cuda____t初始值都是nullptr、像一个指针？</span>
+
+本机头文件将cudaGraph_t和cudaGraphExec_t定义为内部结构指针的类型别名，类型名已经包含指针含义，所以声明变量时不用再写*。它们作为句柄交给CUDA API识别、管理相应对象，内部结构不用自己访问；初始化nullptr只表示这两个变量尚未取得有效图句柄。&graph、&exec用于接收API写回的句柄，逻辑与输出指针相同。<mark>不能把所有cuda___t都看成指针，_t只是命名习惯，例如cudaError_t是错误码类型。</mark>
+
+**节点检查为什么先查询数量，再逐个查类型**
+
+<span style="color:red">用户提问：讲解193～199行的count、nodes和两次cudaGraphGetNodes，以及200～205行的循环。</span>
+
+graph和exec有效后，第一次cudaGraphGetNodes(graph,nullptr,&count)只查询节点数；第二个nullptr表示不接收列表，&count让API写回数量。知道count后，用std::vector&lt;cudaGraphNode_t&gt; nodes(count)在CPU准备存句柄的数组，nodes.data()给出数组起始地址，第二次cudaGraphGetNodes把节点句柄填进去。这里没有新增kernel或数组H2D传输，节点列表也不作为kernel执行顺序的证明。
+
+kernel_nodes先设为(count==3)，只检查数量；for(auto node:nodes)依次读取句柄，cudaGraphNodeType type{}准备接收类型的CPU变量，cudaGraphNodeGetType(node,&type)写回类别，再计算：
+
+```cpp
+kernel_nodes = (type == cudaGraphNodeTypeKernel) && kernel_nodes;
+```
+
+当前是kernel且此前通过，结果才保持true。假设数量为3但类型依次为kernel、拷贝、kernel，则结果为true→true→false→false；一旦失败，后面的正确节点不能恢复true。最终true表示数量为3且全为kernel类型，不能独立证明运算内容、依赖或结果正确；数值由CPU reference另查，实际GPU活动由trace核对。查询类型不会执行该节点。
+
+**数据已经在显存，为什么仍有kernel间隙**
+
+<span style="color:red">用户提问：launch_chain里面就是按顺序调用device上显存的内容，Graph减少的间隙原本主要花在哪里，是H2D调度开销吗？</span>
+
+launch_chain本身在CPU执行，里面的&lt;&lt;&lt;...&gt;&gt;&gt;通过Runtime/Driver发起启动，传入kernel、grid/block、stream及指针等参数；GPU执行kernel函数体时才读写显存。数据常驻显存解决了数组搬运问题，但CPU仍须逐次提交启动，GPU也须接收并衔接这些工作。同stream保证顺序，不保证前后kernel零间隙；cudaGetLastError同样是host错误查询，不是GPU计算。
+
+本例kernel约1～2μs，CPU逐次提交及GPU启动衔接的开销可能明显影响整批耗时。Graph把工作及依赖提前准备，一次提交一条链，减少重复的提交准备并让CUDA按已知流程执行。<mark>Graph优化的是固定工作链的提交与衔接，GPU仍执行三个独立kernel，保持原来的数据依赖。</mark> 从本次目标窗口无memcpy/memset可排除其中数组传输，但不能把某个间隙精确拆成CPU、Driver、GPU调度各占多少；系统环境和profiler也可能影响间隙。
+
+**正式实验：稳态更快与间隙更小分别看证据**
+
+<span style="color:red">用户提问：结合实验结果对比突出CUDA Graph的作用。</span>
+
+本次总结只重读既有证据，当前源码SHA-256与11月6日正式补全日志、11月9日正式NSYS日志一致。两次实验都为GTX1650 / CC7.5 / 14SM、NVCC12.9.86、Runtime12090、DriverAPI13030，CUDA_LAUNCH_BLOCKING unset。11月6日正式check两路径各4099项全部正确、最大误差0，memcheck零错误；这些保持为已有验证，不冒充本次总结新运行。
+
+11月6日普通bench预热3批、测21批，每批64条链，三种时间各自中位数如下，单位μs：
+
+| 边界 | direct | graph |
+| --- | --- | --- |
+| host_submit：CPU提交循环 | 1158.311 | 359.904 |
+| host_complete：同一起点到整批等待完成 | 1534.156 | 627.443 |
+| Event span：同stream整批区间，含间隙 | 1497.024 | 595.744 |
+
+本机本轮host完成区间从约1.534ms到0.627ms，耗时比约2.45，减少59.1%。host_complete已包含submit；stop Event提交及最终等待也在其中。start Event的host提交在t0前，stop提交在t1后，Event并非CPU timer的相同边界，也不是kernel耗时求和。分配、H2D、capture/实例化、哨兵、D2H及CPU校验在计时外，只说明稳态收益，没有测一次性建图回本次数。原始结果见 [正式补全日志](../reports/CH16/completed-2026-11-06.txt) 和 [讲义正式验证](chapters/16_graph_replay.md#正式补全与验证2026-11-06)。
+
+11月9日当前正式版的独立NSYS node trace，提取每份报告最后192个GPU kernel作为目标批次：
+
+| 目标批次观测 | direct | graph |
+| --- | --- | --- |
+| CPU提交主计算API | 192次普通launch | 64次Graph launch |
+| GPU kernel数 | 192，每阶段64 | 192，每阶段64 |
+| kernel自身耗时合计 | 330.048μs | 332.736μs |
+| 首kernel开始至末kernel结束 | 1365.216μs | 751.394μs |
+| 链内128个间隙中位数 | 2.016μs | 0.320μs |
+| 链间63个间隙中位数 | 1.920μs | 2.144μs |
+| 目标GPU窗口memcpy/memset | 0 / 0 | 0 / 0 |
+
+<mark>本次计算数量相同、kernel耗时合计接近，Graph链内衔接明显紧凑；链间仍有空档，不能说所有间隙都降低或消失。</mark> profiler与普通bench分属不同运行，不能相加、相减或拼成一次延迟分解；历史11月5日临时版6.032μs链内间隙也不代替本次2.016μs。单卡、小kernel链的结果不预设适用于所有工作负载。
+
+**在NSYS里读哪条轨迹，图从哪里来**
+
+<span style="color:red">用户提问：能不能在NSYS里面直观对比出两种模式kernel间隙开销？</span>
+
+采集需用--cuda-graph-trace=node，才能展开Graph内部节点；node采集增加开销。CPU的CUDA API行看提交，CUDA HW下目标stream的kernel色块看实际GPU执行。两份报告目标stream ID均为13，完整各963次kernel，最后一批192次才是对照样本；观察时保持相同时间跨度，空档为后kernel的Start减前kernel的End。
+
+以各报告目标首kernel开始归零，普通首链A为0～1.760μs、B为4.000～5.696μs，空档2.240μs；Graph首链A为0～1.728μs、B为2.048～3.744μs，空档0.320μs。Graph首链三个节点关联同一次Graph launch，Correlation ID=453，普通首链则为1719/1721/1723。不能拿CPU API条的宽度当GPU间隙，也不从WSL跨CPU/GPU端点做精确等待拆分。
+
+[实测对照图](../reports/CH16/experiment-2026-11-09-timeline.png)由Python/Matplotlib按NSYS报告→SQLite→GPU端点绘制；矩形位置/宽度取自实测，颜色、A/B/C和链编号由脚本添加，每份报告分别归零。它不是GUI截图，灰色只表示目标stream上相邻kernel的空档，不证明整卡都空闲。原始 [direct报告](../reports/CH16/experiment-direct-2026-11-09.nsys-rep) 和 [graph报告](../reports/CH16/experiment-graph-2026-11-09.nsys-rep)保留；完整端点、命令与GUI版本边界见 [讲义读图路线](chapters/16_graph_replay.md#正式-nsys-间隙对照与-gui-阅读路线2026-11-09) 及 [摘要JSON](../reports/CH16/experiment-2026-11-09-summary.json)。用户要求并接触了对照讲解，尚无个人打开GUI、采集或完整独立读图验收的证据。
+
+### 踩坑记录
+
+本章实际难点包括：指针变量的值与变量地址、cudaMalloc的错误码返回与地址写回、Graph句柄类型别名、capture记录与GPU执行、两次查询节点的用途、数量检查与逐类型累积检查，以及把数据常驻显存误等同于启动不再有开销。用户对&b.input第一次讲解明确表示没明白，已用具体假设地址和CPU盒子示意重讲；不把再次讲解记为已经独立掌握，也不把试探性提问写成用户已经确认的错误结论。
+
+原骨架曾安全回退并拒绝Graph计时，当前两处TODO均由Codex补全，正式版应PASS。数值PASS、memcheck零错误、3个kernel节点及教学bool分别有不同验证范围，不能互相替代。192次launch变64次是主计算提交计数，不代表所有CUDA API只剩64次；GPU仍执行192个kernel。时间比较需分清普通bench与trace、链内与链间、首次准备与稳态，不用单次间隙差给CPU/Driver内部开销定量归因。
+
+### 八股自测
+
+不看代码，沿一条链说明CPU何时capture、何时实例化、何时replay、何时等完成，解释graph与exec、&b.input与b.input分别是什么，以及固定地址为什么要保持有效。指出节点数量/类型检查与实际执行、数值校验各自能证明什么。
+
+再用自己的运行结果和NSYS轨迹，解释为什么CPU主计算提交192→64而GPU kernel数仍为192；指出一对GPU端点算出间隙，说明本轮2.016/0.320μs、链间1.920/2.144μs和普通host完成1.534/0.627ms的不同口径。说明H2D放在哪里、图的哪些部分来自实测、为什么Graph仍有空档。以上用于后续独立验收，不追加图更新、跨stream捕获或框架工程。

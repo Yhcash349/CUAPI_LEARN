@@ -26,7 +26,7 @@
 | 13 Host 异步 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、TODO 补全、验证、计时及GUI讲解总结 | 正式数值、完成边界、memcheck、计时及NSYS关联通过；用户已提供GUI截图并定位第五次kernel，个人程序运行/采集及完整独立解释待验收 |
 | 14 Stream | RUNNING | 45～60min | — | 未评估 | Codex 骨架、讲义、两处 TODO 补全、验证与总结 | 正式版same/split配置/路由、8198项全量数值、memcheck与计时通过；历史临时版NSYS对照及用户双stream/默认stream GUI截图已有证据；个人运行/采集与完整独立解释待验收 |
 | 15 Event 与重叠 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、讲义、两处 TODO 补全、验证、讲解与总结 | 正式版全量数值、既有memcheck、普通计时及2026-11-05正式NSYS对照通过；用户已部分复述连续提交与槽位复用，stream/slot和ready/done关系及重绘图来源已讲解；个人运行/读图与完整独立解释待验收 |
-| 16 Graph | TODO | 45～60min | — | 未评估 | 未开始 | — |
+| 16 Graph | RUNNING | 45～60min | — | 未评估 | Codex 骨架、两处 TODO 补全、验证、逐行讲解与总结 | 正式版节点/数值、既有memcheck/普通计时及2026-11-09正式NSYS node对照通过；指针/句柄、节点检查和间隙已讲解并总结；个人运行/读图与独立解释待验收 |
 | 17 编译产物 | TODO | 45～60min | — | 未评估 | 未开始 | — |
 | 18 Driver | TODO | 45～60min | — | 未评估 | 未开始 | — |
 | 19 内存复用 | TODO | 45～60min | — | 未评估 | 未开始 | — |
@@ -670,3 +670,57 @@ Ch15保持RUNNING，用户代码完成部分尚无证据，两处补全、个人
 明确对照PNG是Codex用Matplotlib从NSYS SQLite原始GPU区间重绘：位置/宽度来自实测，颜色、chunk标签和布局由脚本添加，不是NSYS GUI截图。用户已部分复述连续提交与chunk2复用slot0的过程，并查看/询问重绘图，但没有据此认定个人编译、采集、NSYS GUI交互或完整独立解释通过。两处实现和实验执行均由Codex完成，Ch15仍RUNNING，掌握度未上调；实际学习与文档整理耗时未记录。
 
 本次仅修改NOTE与RECORD，核对源码哈希、既有日志/JSON/CSV的数值与端点、文档链接及diff格式；未修改CUDA源码、重新编译、执行GPU或重新采集profiler，没有新增临时文件。无计划偏离、新依赖或额外Claude审阅需要，未启动Claude、未提交或推送，保留既有工作区改动。
+
+## 2026-11-05：Ch16 Graph 内容生成与教学预检
+
+按用户“生成CH16内容”的要求，落实PLAN阶段C。新增 [CH16/graph_replay.cu](../CH16/graph_replay.cu) 与 [Graph讲义](chapters/16_graph_replay.md)，同步PLAN目录/变更记录及NOTE预习入口。固定N=4099、float32、block256、grid17，四个device数组各16396字节；单stream依次执行add_one→scale_two→subtract_half，每批重复64条链，始终从同一input开始。唯一变量为逐kernel普通启动或固定链的Graph replay，输入、计算、地址与依赖不变。
+
+Codex提供三个kernel、host生命周期、独立CPU double reference、NaN哨兵、全量校验、check/bench/trace模式及三种计时边界。正式源码保留capture/实例化和replay两处TODO；未补时Graph安全回退到direct，但明确标记未完成并拒绝该路径计时。讲义沿thread3解释数据流，限定45～60分钟，包含预测、两个API练习、命令、capture合法性、固定地址生命周期、NSYS node trace和验收，不扩展跨stream capture、图更新或框架工程。按本机12.9头文件及NVIDIA12.9.1官方文档核对API签名和语义，按现场nsys help核对node参数。
+
+现场GTX1650 / CC7.5 / 14SM、Runtime12090、DriverAPI13030、KMD610.88、NVCC12.9.86、Compute Sanitizer2025.2.1.0、NSYS2026.4.1，CUDA_LAUNCH_BLOCKING unset。正式骨架及临时补全版均编译无警告、无spill，ptxas报告三个kernel各10 registers/thread、0 barriers。两版两路径各全量检查4099项，数值PASS、最大绝对误差0；memcheck（padding32）均零错误。正式骨架check both、bench graph及memcheck退出1是TODO未完成的预期应用状态，check direct退出0；临时版capture/实例化检查三个kernel节点通过，check/memcheck/bench/NSYS采集、导出与stats均退出0。
+
+临时版只补两个helper，具体实现及源码哈希保存在日志。独立普通bench各预热3批、测21批，每批64条链：host_submit中位数direct2190.224μs、graph1002.935μs，host_complete为2388.791/1049.644μs，Event span为2347.872/1015.904μs。submit含提交循环及错误检查，complete已包含submit并加stop Event提交和完成等待；Event覆盖同stream整批并包含间隙，不能相加或相减冒充单kernel/精确等待开销。分配、上传、capture/实例化、哨兵、回读及CPU校验均在外，没有测一次性建图成本回本次数，也不作普遍加速承诺。
+
+另外两次NSYS采集显式使用--cuda-graph-trace=node。各完整trace963次GPU kernel，取最后192次为目标批次，三种kernel各64次、顺序符合链、stream ID13，GPU端点无前后交叠。目标direct192次cudaLaunchKernel_v7000各关联1个kernel；graph64次cudaGraphLaunch_v10000各关联3个kernel，证明本次减少提交但未融合kernel。完整graph trace320次Graph launch和6次普通launch，后者包含预热及capture时host调用，不等于6次额外GPU执行。graph目标首链三个GPU区间为0～1.728、2.048～3.776、4.064～5.824μs，均关联Correlation453，直接展示一次Graph API对应多个GPU活动。
+
+目标GPU跨度direct7712.763μs、graph824.593μs；链内128个间隙中位数6.032/0.320μs，链间63个间隙中位数6.848/2.528μs。这些来自独立profiler运行，不与普通bench混算，不把单次间隙或长尾差值全部归因于某个硬件机制。全量数值只核对每批最终输出，实际执行次数由trace另证；memcheck零错误也不替代Graph依赖语义检查。
+
+完整命令、正式/临时源码SHA-256、编译/运行输出、退出码及helper替换内容见 [预检日志](../reports/CH16/preflight-2026-11-05.txt)。保留 [direct报告](../reports/CH16/preflight-direct-2026-11-05.nsys-rep)、[graph报告](../reports/CH16/preflight-graph-2026-11-05.nsys-rep)、对应SQLite、[目标CSV](../reports/CH16/preflight-2026-11-05-timeline.csv)、[摘要JSON](../reports/CH16/preflight-2026-11-05-summary.json) 与 [提取脚本](../reports/CH16/preflight-2026-11-05-analysis.py)。性能和Graph trace仅来自临时补全版；临时源码与可执行文件已清理，正式源码/build保留两处TODO。GUI、NCU、racecheck、synccheck均NOT RUN。
+
+Ch16保持RUNNING，辅助程度为Codex骨架、讲义与教学预检；用户本次提出生成需求，尚无两处实现、个人运行/读图或独立解释的验收证据，前章状态不变。实际学习与工程准备/agent执行耗时未记录。无新依赖、计划偏离或额外Claude审阅需要，未启动Claude、未提交或推送Git。
+
+## 2026-11-06：Ch16 两处 TODO 正式补全与验证
+
+按用户“完成TODO1和TODO2”的要求，Codex修改 [CH16/graph_replay.cu](../CH16/graph_replay.cu)：capture_chain在传入stream开启Global capture，调用launch_chain录入一条链，结束capture得到graph并实例化到exec；replay_chain调用cudaGraphLaunch(exec,stream)。各API均检查状态、成功后返回true；移除两处TODO与占位，补充中文语义注释，保留路径检查和安全回退。kernel、输入、shape、固定地址、reference、预热/样本数及计时边界均不变。同步PLAN目录、NOTE入口、讲义当前行为和本页，生成预检及原始练习路线保留并标明历史状态，保留既有工作区改动。
+
+现场GTX1650 / CC7.5 / 14SM、Runtime12090、DriverAPI13030、KMD610.88、NVCC12.9.86、Compute Sanitizer2025.2.1.0，CUDA_LAUNCH_BLOCKING unset。正式build重编译无警告、无spill，ptxas报告三个kernel各10 registers/thread、0 barriers。捕获检查3个kernel节点通过，direct/graph各4099项全量数值PASS、最大绝对误差0，graph使用实际graph_replay路径；memcheck（padding32）零错误。编译、check、memcheck、bench均退出0。
+
+独立普通bench每种方式预热3批、测21批，每批64条链：host_submit中位数direct1158.311μs、graph359.904μs，host_complete1534.156/627.443μs，Event span1497.024/595.744μs。保留三种计时的不同边界，不相加或直接相减，不与历史预检组成性能A/B；分配、上传、capture/实例化、哨兵及回读校验在计时外。命令、正式源码SHA-256、环境、编译/运行原始输出及退出码见 [正式补全日志](../reports/CH16/completed-2026-11-06.txt)。本轮NSYS、NCU、GUI、racecheck、synccheck均NOT RUN，历史临时版NSYS不冒充正式版新采集，memcheck零错误不替代Graph依赖语义核查。
+
+两处实现和验证均由Codex完成，个人运行/读图及完整独立解释仍待验收，Ch16保持RUNNING，掌握度未据此提高。实际学习与工程执行耗时未记录。无新增临时实现文件、新依赖、计划偏离或额外Claude审阅需要，未启动Claude、未提交或推送Git。
+
+## 2026-11-09：Ch16 正式NSYS间隙对照与GUI阅读路线
+
+按用户“能不能在NSYS里面直观对比出两种模式kernel间隙开销”的要求，使用当前正式源码重新编译、check并分别采集direct/graph，不改CUDA源码。SHA-256为0040ef8165bd4f30848c55590ace7db577c3eaf664fc0e29b51925cc1d761a42，与11月6日正式补全版一致。现场GTX1650 / CC7.5 / 14SM、Runtime12090、DriverAPI13030、NVCC12.9.86、NSYS CLI2026.4.1，CUDA_LAUNCH_BLOCKING unset。编译无警告、无spill，三个kernel各10 registers/thread、0 barriers，check两路径各4099项全量正确、最大误差0；编译/check/两次采集及SQLite导出/stats均退出0。
+
+采集显式使用--cuda-graph-trace=node，以展示Graph内部kernel活动。各报告963个GPU kernel，取最后192个为目标，三种阶段各64次、顺序A→B→C、stream ID13；direct目标192次cudaLaunchKernel_v7000各关联1个kernel，graph目标64次cudaGraphLaunch_v10000各关联3个kernel。两份目标GPU时间窗均无memcpy/memset活动，不能将其中空档解释为数组H2D传输。
+
+目标GPU整批跨度direct1365.216μs、graph751.394μs，kernel自身耗时合计330.048/332.736μs，191个相邻空档合计1035.168/418.658μs；链内128个间隙中位数2.016/0.320μs，链间63个间隙中位数1.920/2.144μs。Graph链内衔接更紧，仍保留链间空档，不能声称所有间隙降低或消失。各报告按目标首kernel归零，首链direct的A区间0～1.760μs、B为4.000～5.696μs，首空档2.240μs；graph的A为0～1.728μs、B为2.048～3.744μs，首空档0.320μs。graph首链三个节点均关联Correlation453，direct首链为1719/1721/1723。
+
+新增Python/Matplotlib实测对照图，含整批192个kernel与前3条链9个kernel两个面板，每面板两行共用刻度，矩形起止与宽度取自SQLiteGPU端点、每份报告独立归零。图为重绘而非NSYS GUI截图；灰色只表示目标stream的kernel间隙，不证明整卡空闲，不将GPU间隙全归于CPU/Driver某项开销，也不与11月6日普通bench混算。本轮未新跑普通bench或Compute Sanitizer，NCU/racecheck/synccheck NOT RUN。
+
+讲义新增原始报告链接、目标定位、GPU End/Start相减、CPU/API与CUDA HW区分、关联检查及版本说明，NOTE新增概念入口，当前进度仍RUNNING。现场nsys-ui --version退出0，默认GUI仍2025.1.3.140并打印WSL/OpenGL回退提示；本轮未启动交互GUI、安装或升级GUI，读新报告需匹配2026.4.1或更新GUI。工具用法核对现场help与NVIDIA官方User Guide。
+
+完整命令、版本、源码哈希与输出见 [实验日志](../reports/CH16/experiment-2026-11-09.txt)。保留 [direct报告](../reports/CH16/experiment-direct-2026-11-09.nsys-rep)、[graph报告](../reports/CH16/experiment-graph-2026-11-09.nsys-rep)、对应SQLite、[目标CSV](../reports/CH16/experiment-2026-11-09-timeline.csv)、[摘要JSON](../reports/CH16/experiment-2026-11-09-summary.json)、[提取绘图脚本](../reports/CH16/experiment-2026-11-09-analysis.py)、[PNG](../reports/CH16/experiment-2026-11-09-timeline.png)及同名SVG，原有历史报告未覆盖。无无效临时实现文件、新依赖或计划偏离，无额外Claude审阅需要，未启动Claude、未提交或推送。所有采集/绘图由Codex完成，个人运行/读图与独立解释待验收，实际学习及工程执行耗时未记录。
+
+## 2026-11-09：Ch16 本章总结
+
+按用户“总结本章内容”的要求，更新NOTE的Ch16阅读入口，新增“今日完成任务、基本概念、踩坑记录、八股自测”完整复盘，串联11月5日生成、11月6日正式补全和11月9日正式NSYS实验。内容覆盖三阶段链/参数与数组复用、capture/实例化/replay、helper成功与完成边界、指针变量地址与显存地址、cudaMalloc输出参数、Graph句柄类型别名及nullptr、两次节点查询、CPU vector与节点类型布尔累积、host提交与GPU执行、间隙/H2D区别，以及普通计时和NSYS读图。用户真实问题用红色标签、关键结论用mark，未编造个人实现或调试经历。
+
+核对当前源码SHA-256与两份正式日志一致：11月6日普通host_submit中位数1158.311/359.904μs，host_complete1534.156/627.443μs、耗时比约2.45及减少59.1%，Event span1497.024/595.744μs；全量正确与memcheck零错误为已有验证。11月9日NSYS目标两路径各192个kernel、主计算API192/64次、kernel耗时合计330.048/332.736μs，链内间隙中位数2.016/0.320μs、链间1.920/2.144μs，目标窗口memcpy/memset均0。保留普通bench、独立trace与历史临时预检的边界，未将三类数据混算。
+
+总结强调Graph保留192次GPU计算及依赖、缩减提交并改善本例链内衔接，仍有链间间隙，单次空档不能精确归因CPU/Driver。重绘图为NSYS原始GPU端点经SQLite与Matplotlib生成，非GUI截图；同面板刻度一致、各报告独立归零，灰色不证明整卡空闲。已有原始报告、目标CSV、摘要JSON和讲义链接均保留。
+
+用户多次要求逐行解释，并对&b.input第一次解释明确表示没明白，后用具体假设地址重讲；这些记录为真实理解难点，未等同个人独立掌握。代码补全、工具执行和绘图由Codex完成，尚无个人运行/采集/GUI操作或完整独立解释的验收证据，Ch16保持RUNNING，掌握度未上调。实际学习及文档整理耗时未记录。
+
+本次只修改NOTE与RECORD，核对当前源码、已有日志/JSON/CSV、数值、文档链接与diff格式，未修改CUDA源码、编译、运行GPU或重新采集profiler，未新增临时文件。无新依赖、计划偏离或额外Claude审阅需要，未启动Claude、未提交或推送Git，保留既有工作区改动。
