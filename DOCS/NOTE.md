@@ -58,6 +58,22 @@
 
 2026-11-09补充 [正式版NSYS间隙对照与GUI阅读路线](chapters/16_graph_replay.md#正式-nsys-间隙对照与-gui-阅读路线2026-11-09)。同一批192个kernel的执行耗时合计相近，普通/Graph链内间隙中位数为2.016/0.320μs，目标区间没有memcpy/memset；这体现工作提交与执行衔接的变化，不能把所有间隙都归成H2D拷贝开销。重点看CUDA HW的GPU色块端点，CPU CUDA API行用于看逐kernel提交与Graph提交，不能互换计时含义。图由NSYS SQLite实测端点重绘，非GUI截图；原始报告保留，Graph仍存在链间间隙。本页末尾的Ch16总结整理本章实际提问、API流程、指针/句柄、节点检查、三种计时与正式实验，个人读图与独立解释待验收。
 
+## Ch17 阅读入口（2026-11-09）
+
+[编译产物讲义](chapters/17_compilation_artifacts.md) 从熟悉的 vector add 出发：同一份 CUDA 源码，普通构建得到含 host 代码与 device image 的可执行文件，`--ptx` 和 `--cubin` 则只保留 device 产物。PTX 是还需进一步翻译的 GPU 程序文本，cubin 是面向指定架构的二进制，SASS 是其中机器指令的可读反汇编；本章只比较编译输出阶段，不做性能实验。
+
+两处练习在 `CH17/compile.sh`，2026-11-09 已按用户要求由 Codex 补全 PTX/cubin 编译命令，分别使用 `--ptx --gpu-architecture=compute_75` 和 `--cubin --gpu-architecture=sm_75`。`CH17/vector_add.cu` 的 host、已学过的索引/加法和全量校验由 Codex 完整提供；`extern "C"` 保留 `vector_add` 入口名称及 a/b/c/n 参数顺序，供 Ch18 使用。阅读时区分 compute_75、sm_75 与 PTX 文本里的 `.target sm_75`，不要把 PTX `.version 8.8` 当成 GPU 能力或 Toolkit 版本，也不要把 PTX 虚拟寄存器数量当成 ptxas 的硬件分配结果。
+
+Codex 已重新编译正式脚本三种输出，Runtime 全量数值与 memcheck 通过，正式 PTX/cubin 生成及入口查看通过。普通程序通过不表示已经加载并执行了外部 cubin，外部加载留待下一章。用户已贴出 nvdisasm 命令及完整输出，作为产物查看证据；个人编译/Runtime运行与完整独立解释仍待验收。本页末尾的 Ch17 总结整理本章真实问题、PTX逐线程数据流、地址与数值、SASS及cubin结构，不将讲解直接记为已掌握。
+
+**用户提问：这种 `.sh` 文件以后拿到怎么看其实现的功能？**
+
+`.sh` 通常是保存终端命令的文本脚本，本例指定使用 Bash。先找真正执行工作的命令，再追踪决定命令的输入参数、变量和分支，最后确认工作目录及输出。本例真正工作的是 nvcc；`bash CH17/compile.sh ptx` 把 ptx 作为 `$1`，`mode="${1:-runtime}"` 选择 ptx（省略或传空字符串则默认 runtime），先检查参数是否合法，再在第二个 case 中只进入 ptx 分支。输入是 `CH17/vector_add.cu`，输出由 `-o` 指定为 `build/CH17/vector_add.ptx`。脚本只编译，不启动生成的程序或执行 GPU 加法。
+
+开头 `#!/usr/bin/env bash` 指定直接执行脚本时使用 Bash；显式 `bash 文件` 则已经选定解释器。`chapter_root` 根据脚本所在位置找项目根目录，再 cd 过去，保证相对路径一致。`$#` 是参数数量，`flags=(...)` 是公共参数数组，`"${flags[@]}"` 展开成独立参数；行尾反斜杠把下一物理行接成同一条命令，`;;` 结束一个 case 分支。`set -euo pipefail` 启用常见失败退出、未设置变量检查及管道失败传播；`-e` 存在条件判断等例外，本章只需知道编译失败会让此脚本停止。
+
+先用编辑器或 `less CH17/compile.sh` 阅读源码，再用 `bash -n CH17/compile.sh` 检查语法（不执行主体命令）。需要观察参数展开时，`bash -x CH17/compile.sh ptx` 会显示并实际执行命令，因而也会重新编译输出；`-x` 不是只读预览。语法检查也不保证命令路径或功能正确。参数语义参考 [GNU Bash 手册](https://www.gnu.org/software/bash/manual/bash.html#The-Set-Builtin)。本次提问说明用户开始关注脚本的执行流程，不据此补记为已经独立掌握 Bash。
+
 ## 首轮贯穿的观察问题
 
 | 观察问题 | 将使用的程序证据 |
@@ -1636,3 +1652,142 @@ launch_chain本身在CPU执行，里面的&lt;&lt;&lt;...&gt;&gt;&gt;通过Runti
 不看代码，沿一条链说明CPU何时capture、何时实例化、何时replay、何时等完成，解释graph与exec、&b.input与b.input分别是什么，以及固定地址为什么要保持有效。指出节点数量/类型检查与实际执行、数值校验各自能证明什么。
 
 再用自己的运行结果和NSYS轨迹，解释为什么CPU主计算提交192→64而GPU kernel数仍为192；指出一对GPU端点算出间隙，说明本轮2.016/0.320μs、链间1.920/2.144μs和普通host完成1.534/0.627ms的不同口径。说明H2D放在哪里、图的哪些部分来自实测、为什么Graph仍有空档。以上用于后续独立验收，不追加图更新、跨stream捕获或框架工程。
+
+## 2026-11-09 Ch17：编译产物、PTX与SASS
+
+### 今日完成任务
+
+围绕 [CH17/vector_add.cu](../CH17/vector_add.cu) 和 [compile.sh](../CH17/compile.sh)，学习同一份kernel如何生成PTX、sm_75 cubin以及包含host/device代码的普通可执行文件，并用cuobjdump/nvdisasm查看产物。本章主要变量是编译输出阶段，向量加法、输入和校验保持不变，没有性能对照或JIT缓存实验。
+
+两条编译命令已按用户要求由Codex补全，正式构建、数值校验和memcheck由Codex完成。用户主动询问extern "C"、Bash脚本阅读、PTX逐段含义、64位地址与32位数据、寄存器与方括号、PTX/SASS区别、为何需要IR以及Ch18如何加载cubin，并提供了nvdisasm命令及323行完整输出。该输出已 [原样保存](../reports/CH17/user-nvdisasm-2026-11-09.txt)，作为实际产物查看证据；没有据此推断用户已独立编译、运行Runtime程序或完成全部解释验收。
+
+### 基本概念
+
+**同一份源码，为什么生成不同文件**
+
+<span style="color:red">用户提问：分清源码、PTX、cubin与普通可执行文件的关系。</span>
+
+本例.cu同时包含CPU上的main和GPU上的vector_add。host准备输入、分配显存、H2D、启动kernel、等完成、D2H并逐项校验；device部分每线程计算一项c[i]=a[i]+b[i]。n=1000、float32、每数组4000字节、block128/grid8，共1024线程，最后24个线程跳过访存。
+
+| 产物 | 内容与用途 |
+| --- | --- |
+| `CH17/vector_add.cu` | 人写的CUDA C++，包含host与device代码 |
+| `build/CH17/vector_add.ptx` | kernel的文本中间表示，还需进一步编译，无host main |
+| `build/CH17/vector_add.cubin` | 面向sm_75的GPU机器码及符号、资源、调试等信息，供CUDA加载 |
+| `build/CH17/vector_add` | 可由操作系统启动的host程序，内嵌device image及所需Runtime支持 |
+
+device部分的简化路径为源码→PTX→cubin中的GPU机器码，机器码经工具反汇编显示为SASS。普通构建还要编译host代码并链接；SASS文本是机器指令的可读表示，不是应用运行时额外读取的一份文件。`--ptx`/`--cubin`只输出device产物并丢弃host代码。本章runtime分支明确嵌入sm_75 cubin与PTX，程序运行不依赖旁边那份独立cubin；生成独立cubin也不会自动执行加法。
+
+**PTX和SASS的区别，以及为什么需要IR**
+
+<span style="color:red">用户提问：ptx和sass的区别，为什么要有ptx这个ir？</span>
+
+IR可理解为编译过程中先表达“需要做什么”的中间程序。PTX保留线程、地址空间、类型和运算等信息，使用虚拟寄存器，后端再针对具体GPU做优化、选择机器指令和分配寄存器。SASS则展示目标架构上最终机器指令的可读名称，例如本例PTX的ld.global.f32/add.f32/st.global.f32对应到了sm_75的LDG/FADD/STG；该例的对应不代表所有代码逐条一一对应。
+
+<mark>PTX把前端生成程序与后端适配GPU分开，提供较稳定的编译及分发接口；GPU最终执行的是目标机器指令。</mark> PTX可以在构建阶段继续编译，也可以随程序分发，在需要时由驱动JIT（即时编译）。这受PTX版本、目标能力和驱动支持限制，不表示任意PTX可在任意GPU上运行，也不保证跨架构相同性能。`.version 8.8`是PTX语法版本，`.target sm_75`表示目标能力，`.address_size 64`表示地址宽度；PTX里出现sm_75仍不等于它已是机器码。
+
+**extern "C"让kernel按什么名字被找到**
+
+<span style="color:red">用户提问：为什么要有extern "C"？</span>
+
+C++通常会将参数类型等信息编码进函数的外部名称，以区分重载等情况。`extern "C"`指定C语言链接方式，避免C++名称修饰，使本例PTX/cubin里的入口保持vector_add；`__global__`负责声明GPU kernel。普通`<<<...>>>`启动时编译器会处理名称对应关系，通常不必手工按字符串查找；Ch18要通过模块API查找"vector_add"，保留简单名称便于教学。a/b/c/n的参数顺序由函数签名决定，并非extern "C"额外保证；该修饰不把kernel变成CPU函数，也不带来本章可声称的性能收益。
+
+**如何看懂compile.sh的功能**
+
+<span style="color:red">用户提问：这种.sh文件以后拿到怎么看其实现的功能？</span>
+
+脚本是由解释器执行的一组命令。本例使用Bash，阅读时先找真正工作的nvcc，再追踪参数、变量、分支、工作目录与输出。`mode="${1:-runtime}"`取第一个参数，缺失或为空时默认runtime；case检查并选择runtime/ptx/cubin中的一个分支。chapter_root定位项目根目录，flags数组复用编译选项，`"${flags[@]}"`逐项展开，行尾反斜杠连接命令。具体Bash语法见本页Ch17阅读入口，不扩展成Shell课程。
+
+```bash
+bash CH17/compile.sh runtime  # 普通可执行程序；不带模式时也默认runtime
+bash CH17/compile.sh ptx      # --ptx --gpu-architecture=compute_75
+bash CH17/compile.sh cubin    # --cubin --gpu-architecture=sm_75
+```
+
+`bash -n`只检查语法，`bash -x`显示展开后的命令并实际执行，不能把-x当作只读预览。脚本本身只编译，不负责运行生成的程序或查看产物。
+
+**沿一个线程读PTX**
+
+<span style="color:red">用户提问：vector_add.ptx这个怎么理解？</span>
+
+`.visible .entry vector_add`声明kernel入口，四个.param依次对应a、b、c的64位指针值和32位n。ld.param取出这些参数值，尚未读取数组元素；mov从%ctaid.x/%ntid.x/%tid.x取得blockIdx.x/blockDim.x/threadIdx.x，mad.lo.s32计算i。以block1/thread3为例，i=1×128+3=131；setp.ge.s32检查i>=n，条件为真就跳到ret，跳过数组读写。
+
+有效线程用i×4得到字节偏移，再加到a/b/c基地址。本例i=131时偏移524字节。cvta.to.global把通用地址转换为global地址表示，不复制数组，也不分配显存；mul.wide.s32将32位乘法结果保留为64位，供地址计算。随后ld.global.f32读取a[i]/b[i]，add.f32相加，st.global.f32写回c[i]。
+
+**地址的64位与float的32位不是来回转换**
+
+<span style="color:red">用户提问：先转换为64位最后又转回32位是为了什么？</span>
+
+第48行cvta.to.global.u64处理的是b的地址，输入%rd2本来已是64位；第58行st.global.f32规定写入一个32位float。<mark>地址宽度描述“去哪里”，数据类型描述“读写什么、多少字节”。</mark> 用64位指针定位内存、读写4字节float，完全可以同时成立，没有将同一个浮点数先扩宽再缩窄。
+
+**寄存器名字与方括号分别表示什么**
+
+<span style="color:red">用户提问：为什么ld和st时其中一个要用[]？意思就是%rd8表示rd8这个寄存器吗？</span>
+
+%rd8是PTX虚拟寄存器的名字；作为源操作数时使用它保存的值，作为目的操作数时接收结果，不是寄存器本身在内存里的地址。寄存器可以装普通数值、偏移或地址；例如%rd5是字节偏移、%rd8是b[i]地址、%f3是加法结果。%rd8也不表示固定硬件寄存器8，实际寄存器分配发生在后端。
+
+```ptx
+add.s64 %rd8, %rd7, %rd5;   // 寄存器里的值相加，算出地址；还未读取该内存
+ld.global.f32 %f1, [%rd8];  // 从该地址读取float，存入%f1
+st.global.f32 [%rd10], %f3; // 将%f3写到%rd10指向的内存
+```
+
+方括号标识内存操作数，直觉对应C++的解引用。ld从右侧内存读取到左侧寄存器，st从右侧寄存器写入左侧内存；这不是所有寄存器都“按地址传值”。.reg声明的是虚拟寄存器，声明个数不能直接当成最终硬件寄存器用量。.loc/.file用于关联源码位置，不是数值计算。
+
+**用工具查看cubin，以及nvdisasm为什么打印这么多内容**
+
+<span style="color:red">用户提问：cubin人类无法阅读，是不是只能通过cuobjdump得到sass？讲解贴出的nvdisasm输出都有哪些内容。</span>
+
+cubin是ELF格式的二进制容器，包含GPU代码和支持加载、执行、调试的其他信息。cuobjdump --dump-sass与nvdisasm都可反汇编其机器指令；cuobjdump还可查看host可执行文件内嵌的device image，nvdisasm接受cubin并提供源码关联等显示。SASS只覆盖机器指令的可读表示，不等于整个cubin，也不保证恢复原CUDA源码。
+
+用户原文从headerflags/elftype、debug区域一直打印到.text.vector_add。前者标记sm_75与64位地址；debug_frame/debug_line/nv_debug_line_sass为调试及行号关联信息；.byte/.word是在展示数据和元数据，不都是GPU指令。.nv.info记录本kernel寄存器数12（0x0c）、frame/最小stack为0，MAXREG_COUNT的0xff不是实际用了255个寄存器。.nv.callgraph是函数调用关系信息，不是Ch16的CUDA Graph；.nv.rel.action属于定位修正相关元数据，当前不解码其内部字段。
+
+本例参数区起点0x160、大小0x1c=28字节，可沿本份元数据及SASS对应如下；这是当前编译产物的布局，不作为跨版本固定合同：
+
+| 参数 | 当前constant bank 0偏移 | 大小 |
+| --- | --- | --- |
+| a | 0x160 | 8字节 |
+| b | 0x168 | 8字节 |
+| c | 0x170 | 8字节 |
+| n | 0x178 | 4字节 |
+
+`c[0x0][0x178]`是SASS里的constant bank访问，不是源码数组c。.nv.constant0.vector_add的.zero 380描述文件区域的初始内容与大小，不是输出数组有380项或参数永远为0。CH18应按API传参数，不手填这些内部偏移。
+
+.text.vector_add才是主要代码：S2R取block/thread编号，IMAD算i，ISETP加条件EXIT处理尾部，IMAD.WIDE计算地址，LDG读输入，FADD相加，STG写回，最后EXIT。R寄存器会复用，同名寄存器在前后可保存不同用途的值。每行/*00c0*/这类数字是代码区内偏移，不是线程编号或耗时；尾部自跳转位于正常EXIT之后，不能据此说正常线程会死循环。
+
+用户输出中的.nv_debug_ptx_txt经字节解码，确实含.version 8.8和.visible .entry vector_add等PTX文本。<mark>这份cubin保留了调试用途的PTX文本；它不是从机器码逆向恢复的PTX，也不代表每个cubin都含这些文本。</mark> 纯机器码无法保证还原为原始PTX，与本例保留调试文本并不矛盾。
+
+```bash
+cuobjdump --dump-sass build/CH17/vector_add.cubin
+nvdisasm -c -g build/CH17/vector_add.cubin
+```
+
+第二条只打印代码区并附源码行号；本轮讲解时Codex已确认能关联.cu第21～24行，便于对照索引、边界与加法。工具语义参考 [Binary Utilities 12.9.1](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-binary-utilities/index.html)，PTX含义参考 [PTX ISA 8.8](https://docs.nvidia.com/cuda/archive/12.9.1/parallel-thread-execution/index.html)，编译流程参考 [NVCC 12.9.1](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-compiler-driver-nvcc/index.html)。首轮不要求背SASS后缀、解码全部ELF元数据或从指令数推断性能。
+
+**与Ch18的连接：加载代码不等于执行代码**
+
+<span style="color:red">用户提问：如何为CH18加载cubin？</span>
+
+概念流程为cuInit→选择device→保留primary context→设为当前线程context→cuModuleLoad读取cubin→cuModuleGetFunction按"vector_add"取得kernel句柄。context是CUDA管理GPU资源和执行状态的环境，module代表加载的代码模块，function句柄标识其中的kernel。之后仍需准备显存和参数、cuLaunchKernel、等完成、回读校验，再清理资源；相对路径取决于进程工作目录。
+
+这里只做过API流程讲解，没有生成Ch18、加载外部cubin或执行Driver启动；后者保持NOT RUN。Runtime程序数值PASS不能替代该验证，也不从本节建立Runtime/Driver严格一一对应关系。
+
+**已有验证及其边界**
+
+11月9日正式补全日志记录GTX1650/CC7.5/14SM、NVCC12.9.86、Runtime12090、DriverAPI13030，脚本三种构建均成功；Runtime的1000项全量mismatches=0、最大绝对误差0，memcheck padding32零错误。ptxas为12 registers/thread、0 barriers、0 stack/spill；PTX1334字节、cubin4456字节。详见 [正式日志](../reports/CH17/completed-2026-11-09.txt) 和 [讲义验证](chapters/17_compilation_artifacts.md#正式补全与验证2026-11-09)。
+
+本次总结核对当前源码、脚本、PTX、cubin及可执行文件哈希与正式日志一致，重读用户贴出的nvdisasm证据，没有重新编译或运行GPU。上述数字是已有验证，不冒充总结时新测量；寄存器数和文件大小不是性能结论。用户已有查看输出及针对性追问，个人编译/Runtime运行、完整独立解释仍待验收。
+
+### 踩坑记录
+
+本章实际疑问集中在：把地址表示转换与float数值转换混为一谈、将寄存器操作理解为一律按地址传值、混淆寄存器名字与硬件编号，以及不清楚ld/st方括号为何位于不同一侧。已用i=131、偏移524字节和C++解引用解释，不把试探性提问或一次确认句当成全部独立掌握证据。
+
+复习时还要分清：PTX版本与GPU能力，PTX虚拟寄存器与ptxas硬件资源，SASS与整个cubin，constant bank的c记法与输出数组c，调试PTX文本保留与机器码逆向还原，以及编译成功、模块加载成功与kernel完成。脚本命令由Codex补全，不能记录为用户独立编写；nvdisasm输出是用户提供的实际查看证据，但不能代替数值或内存安全验证。本章没有性能实验或JIT缓存结论。
+
+### 八股自测
+
+不看讲义，说清.cu、PTX、cubin、SASS文本和普通可执行文件各保存什么、由谁使用；解释PTX中间层为何有价值、为何.target sm_75的PTX仍需编译，以及extern "C"如何帮助Ch18按名找到kernel。
+
+沿block1/thread3说明参数读取、i=131、i×4=524字节偏移、输入读取和输出写回，分别解释%rd8、[%rd8]、cvta.to.global.u64和st.global.f32，指出哪里处理64位地址、哪里读写32位数据。再从SASS找到边界退出、两次读取、一次加法和一次写入，并说明debug/metadata与.text的区别，不能用寄存器声明数或文件大小推出性能。
+
+最后亲自生成并查看两种device产物、运行Runtime校验，指出现有证据没有证明的外部模块加载步骤。能复述局部概念不替代完整验收，Ch17仍保持RUNNING；不追加SASS编码、ELF逐字段、JIT缓存或Ch18实现作为本章门槛。

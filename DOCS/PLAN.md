@@ -159,7 +159,8 @@ CH13/                                       # Host 等待练习已按要求补�
 CH14/                                       # stream 创建与启动路由均已按要求补全，个人运行与解释待验收
 CH15/                                       # Event 接力两处等待已按要求补全，个人运行与解释待验收
 CH16/                                       # capture/实例化与 replay 已按要求补全，个人运行与解释待验收
-CH17/ ... CH19/                              # 按需创建
+CH17/                                       # PTX/cubin 两处编译命令已按要求补全，个人运行与解释待验收
+CH18/ ... CH19/                              # 按需创建
 common/                                      # 逐步提取的检查、计时 helper
 scripts/                                     # 按需新增 env/profile/export 脚本
 DOCS/chapters/XX_topic.md                     # 一章一份简短任务和实验记录
@@ -216,3 +217,4 @@ Reference 查参数、错误与同步语义，Programming Guide 查执行机制�
 | 2026-11-02 | 准备 Ch14 同/不同 stream 的独立双任务骨架、讲义与 NSYS 预检 | 用户明确要求“生成CH14内容”；仅改变第二个 kernel 的目标 stream，保留 stream 创建与启动路由两处 TODO；host 计时等待两队列完成，GPU 重叠由独立 trace 核对，不引入跨 stream Event、pinned memory 或流水，不补记前章完成 |
 | 2026-11-02 | 准备 Ch15 Event 接力、pinned copy 与双缓冲流水骨架、讲义及 NSYS 预检 | 用户明确要求“生成CH15内容”；两个 device 槽位交替处理 8 个独立块，仅对照每块是否额外 CPU 等待，保留输入就绪与槽位复用两处设备等待 TODO；整批 host 计时包含传输，用 GPU timeline 核对依赖与重叠，不扩展三阶段流水、Graph 或前章验收 |
 | 2026-11-05 | 准备 Ch16 固定三 kernel 链 capture/replay 骨架、讲义与教学预检 | 用户明确要求“生成CH16内容”；固定地址、输入和单 stream 依赖，只改变普通启动或 Graph replay，保留 capture/实例化与 replay 两处 TODO；普通计时与 NSYS node trace 分开，不扩展跨 stream capture、图更新或框架工程，不补记前章完成 |
+| 2026-11-09 | 准备 Ch17 同源 vector add 的 PTX/cubin 编译练习、产物观察讲义与预检 | 用户明确要求“生成CH17内容”；只改变编译输出阶段，保留两处命令 TODO，Runtime 校验骨架完整提供；固定 sm_75 及 vector_add 参数合同供 Ch18 复用，不扩展 JIT 缓存、SASS 优化或 Driver 实现，不补记前章验收 |

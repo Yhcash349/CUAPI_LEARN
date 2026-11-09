@@ -27,7 +27,7 @@
 | 14 Stream | RUNNING | 45～60min | — | 未评估 | Codex 骨架、讲义、两处 TODO 补全、验证与总结 | 正式版same/split配置/路由、8198项全量数值、memcheck与计时通过；历史临时版NSYS对照及用户双stream/默认stream GUI截图已有证据；个人运行/采集与完整独立解释待验收 |
 | 15 Event 与重叠 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、讲义、两处 TODO 补全、验证、讲解与总结 | 正式版全量数值、既有memcheck、普通计时及2026-11-05正式NSYS对照通过；用户已部分复述连续提交与槽位复用，stream/slot和ready/done关系及重绘图来源已讲解；个人运行/读图与完整独立解释待验收 |
 | 16 Graph | RUNNING | 45～60min | — | 未评估 | Codex 骨架、两处 TODO 补全、验证、逐行讲解与总结 | 正式版节点/数值、既有memcheck/普通计时及2026-11-09正式NSYS node对照通过；指针/句柄、节点检查和间隙已讲解并总结；个人运行/读图与独立解释待验收 |
-| 17 编译产物 | TODO | 45～60min | — | 未评估 | 未开始 | — |
+| 17 编译产物 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、两处命令补全、验证、PTX/SASS讲解与总结 | 正式构建/全量数值/memcheck及入口查看通过；用户已提供nvdisasm命令与完整输出，寄存器/地址/产物关系已讲解；个人编译/Runtime运行与完整独立解释待验收 |
 | 18 Driver | TODO | 45～60min | — | 未评估 | 未开始 | — |
 | 19 内存复用 | TODO | 45～60min | — | 未评估 | 未开始 | — |
 
@@ -724,3 +724,37 @@ Ch16保持RUNNING，辅助程度为Codex骨架、讲义与教学预检；用户�
 用户多次要求逐行解释，并对&b.input第一次解释明确表示没明白，后用具体假设地址重讲；这些记录为真实理解难点，未等同个人独立掌握。代码补全、工具执行和绘图由Codex完成，尚无个人运行/采集/GUI操作或完整独立解释的验收证据，Ch16保持RUNNING，掌握度未上调。实际学习及文档整理耗时未记录。
 
 本次只修改NOTE与RECORD，核对当前源码、已有日志/JSON/CSV、数值、文档链接与diff格式，未修改CUDA源码、编译、运行GPU或重新采集profiler，未新增临时文件。无新依赖、计划偏离或额外Claude审阅需要，未启动Claude、未提交或推送Git，保留既有工作区改动。
+
+## 2026-11-09：Ch17 编译产物骨架、讲义与预检
+
+按用户“生成CH17内容”的要求，对应 PLAN 阶段D，仅准备 Ch17，不生成 Ch18/19。新增 `CH17/vector_add.cu`、`CH17/compile.sh` 和 [本章讲义](chapters/17_compilation_artifacts.md)，同步 PLAN 目录/变更记录及 NOTE 预习入口。复用 Ch02 的向量加法思路，host 输入/CPU double reference/全量校验与错误检查完整提供；主要变量是同源代码的编译输出阶段。正式脚本保留生成 PTX 与 cubin 的两处命令 TODO，已提供的 Runtime 分支显式嵌入 sm_75 cubin 和 compute_75 PTX。以 `extern "C"` 固定入口 vector_add，参数依次为 a/b/c/n，练习应生成 `build/CH17/vector_add.cubin` 供 Ch18 使用。没有新增依赖、计时实验或 JIT 缓存/SASS 优化内容。
+
+现场核验 GTX1650 / CC7.5 / 14SM、KMD610.88、Runtime12090、DriverAPI13030，NVCC12.9.86、cuobjdump12.9.82、nvdisasm12.9.88、Compute Sanitizer2025.2.1.0，CUDA_LAUNCH_BLOCKING unset。正式 Runtime 构建无警告；n=1000、float32、每数组4000字节、grid8/block128，全量 mismatches=0、最大绝对误差0，memcheck padding32 零错误，均退出0。ptxas 为12 registers/thread、0 barriers、0 stack/spill；本章不据此推断性能。正式 Bash 语法通过，ptx/cubin 两个占位分支按预期提示 TODO 并退出2，非法模式与多余参数也退出2。
+
+Codex 临时仅补两条命令、将产物隔离到 `build/CH17/preflight/`；PTX/cubin 生成退出0，PTX 为1334字节，含 `.version 8.8`、`.target sm_75`、`.address_size 64`、`.visible .entry vector_add`，参数为3×u64与1×u32。cubin 为4456字节的NVIDIA CUDA ELF，cuobjdump符号/SASS与nvdisasm均找到 vector_add、目标sm_75；独立 cubin 的ptxas资源与Runtime一致。Runtime可执行文件内嵌的PTX/SASS均能提取。临时补全脚本已删除，正式源码保留两处练习；保留预检产物用于复盘，不替代用户应生成的正式路径。
+
+完整命令、正式源码哈希、临时补全内容、版本、原始输出、退出码和产物哈希见 [预检日志](../reports/CH17/preflight-2026-11-09.txt)，同目录保存 cubin SASS/符号/nvdisasm 与 Runtime PTX/SASS。Runtime 校验只证明对应可执行文件内的代码，外部PTX/cubin加载执行 NOT RUN，留待 Ch18；NSYS/NCU/性能计时/racecheck/synccheck 均 NOT RUN，本例无shared协作或barrier，不新增相关要求。官方语义查CUDA12.9.1 NVCC/Programming Guide/Binary Utilities，选项同时核对现场help；无计划偏离或额外Claude审阅需要，未启动Claude、未提交或推送Git。
+
+本次内容生成与验证全部由Codex完成，尚无用户填写命令、个人运行/查看或独立解释的验收证据。Ch17记RUNNING、掌握度未评估；Ch00～16的原状态不变。计划学习用时45～60分钟，实际学习与工程执行耗时均未记录。遗留为两处命令练习及本章个人验收。
+
+## 2026-11-09：Ch17 两处编译命令补全与Bash脚本阅读
+
+按用户“完成TODO1和TODO2，以及这种.sh文件以后拿到怎么看其实现的功能”的要求，Codex直接补全 `CH17/compile.sh` 的PTX/cubin分支，移除提示与退出2占位。前者使用 `--ptx --gpu-architecture=compute_75`，后者使用 `--cubin --gpu-architecture=sm_75 -Xptxas=-v,-warn-spills`；同一源码及flags不变，正式输出在build/CH17。新增用法与只编译的注释，Runtime构建命令和CUDA源码未改。同步PLAN目录、NOTE入口和讲义当前状态，保留生成时预检历史，讲义新增正式验证记录。无计划偏离、新依赖或额外Claude审阅需要。
+
+现场GTX1650 / CC7.5 / 14SM、KMD610.88、Runtime12090、DriverAPI13030、NVCC12.9.86、Bash5.2.21、Compute Sanitizer2025.2.1.0，CUDA_LAUNCH_BLOCKING unset。脚本语法、默认Runtime/PTX/cubin构建均退出0；从/tmp通过绝对路径调用cubin成功，非法模式和多余参数按预期退出2。编译无警告，ptxas为12 registers/thread、0 barriers、0 stack/spill。重编译Runtime全量1000项正确、最大误差0、memcheck padding32零错误。正式PTX1334字节、cubin4456字节，与生成时预检的对应device产物哈希相同；PTX含version8.8/targetsm_75/entryvector_add，cubin符号/SASS确认vector_add及sm_75，Runtime嵌入PTX提取成功。外部模块加载执行仍NOT RUN，不新增Driver实现或profiler/性能实验。
+
+NOTE记录用户的真实脚本阅读问题，按命令→输入/变量→分支→工作目录/输出解释nvcc编译脚本，涵盖Bash解释器、`$1`/`$#`、默认值、数组展开、续行、case和错误检查；区分 `bash -n` 语法检查与 `bash -x` 显示并实际执行命令。执行跟踪已实测ptx分支，退出0。GNU Bash手册分页面首次获取超时，随后使用同一官方手册的可访问版本及本机Bash信息核对，没有因页面超时改变实现。
+
+完整证据见 [正式日志](../reports/CH17/completed-2026-11-09.txt)，同目录保存正式cubin SASS/符号、Runtime PTX和 [Bash跟踪](../reports/CH17/completed-shell-trace-2026-11-09.txt)。本轮无临时实现文件、未删除历史证据，未启动Claude、未提交或推送Git。两处命令实现、编译和验证均由Codex完成，个人运行/产物查看与独立解释待验收；Ch17保持RUNNING，掌握度未上调，实际学习及工程执行耗时未记录。
+
+## 2026-11-09：Ch17 本章总结与产物查看证据
+
+按用户“总结本章内容”的要求，更新NOTE的Ch17阅读入口，并在页末新增“今日完成任务、基本概念、踩坑记录、八股自测”总结。覆盖本章真实问题：extern "C"与入口名称、Bash脚本执行流程、源码/PTX/cubin/SASS/普通可执行文件关系、PTX作为IR的用途与兼容边界、逐线程索引及字节地址、64位地址与32位float、虚拟寄存器名称与ld/st方括号、cubin查看工具、nvdisasm调试/资源/参数/代码区域，以及Ch18加载流程的概念连接。用户问题用红色标签、关键理解用mark，不记录为用户已经独立掌握或独立完成TODO。
+
+重读当前compile.sh、vector_add.cu、PTX和正式日志，核对两份源码及PTX/cubin/Runtime可执行文件SHA-256均与11月9日正式日志一致。已有验证为三种构建成功，Runtime n1000/float32/grid8/block128全量mismatches0、最大误差0、memcheck padding32零错误，ptxas12 registers/thread、0 barriers、0 stack/spill，PTX1334字节、cubin4456字节；本次只核对既有证据，没有重编译、运行GPU或重新采集profiler。没有把资源数、文件大小或SASS指令数量当成性能结论。
+
+用户已提供 `nvdisasm build/CH17/vector_add.cubin` 命令及323行完整输出，原文原样保存为 [用户nvdisasm证据](../reports/CH17/user-nvdisasm-2026-11-09.txt)（17823字节），与附件逐字节核对一致；没有覆盖或修改原附件。该输出作为产物查看证据，不能替代用户编译、Runtime数值运行或完整独立解释。重读原文确认SHI_REGISTERS12、参数区起点0x160/大小0x1c、constant0大小380和实际LDG/FADD/STG；解码.nv_debug_ptx_txt确认保留PTX文本，说明它是调试信息而非从机器码逆向恢复，也不泛化到所有cubin。
+
+此前讲解中Codex已只读运行cuobjdump和nvdisasm -c -g，确认当前cubin的vector_add/sm_75及源码21～24行关联，并提取普通可执行文件中的PTX。Ch18仅解释cuInit/device/primary context/current/module/function/launch流程，未生成章节、实际加载外部模块或进行Driver启动；外部PTX/cubin加载执行继续记NOT RUN。PTX/SASS后缀、ELF内部字段、JIT缓存和跨架构实验不增加为本章门槛。
+
+本次只修改NOTE与RECORD并持久保存用户原始查看输出，核对文档链接、证据哈希及diff格式，未修改CUDA源码/编译脚本，没有临时尝试文件、新依赖、计划偏离或额外Claude审阅需要，未启动Claude、未提交或推送Git。当前Ch17保持RUNNING，掌握度未评估；个人产物查看已有输出，个人编译/Runtime运行与完整独立解释仍待验收。实际学习及文档整理耗时未记录。
