@@ -28,7 +28,7 @@
 | 15 Event 与重叠 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、讲义、两处 TODO 补全、验证、讲解与总结 | 正式版全量数值、既有memcheck、普通计时及2026-11-05正式NSYS对照通过；用户已部分复述连续提交与槽位复用，stream/slot和ready/done关系及重绘图来源已讲解；个人运行/读图与完整独立解释待验收 |
 | 16 Graph | RUNNING | 45～60min | — | 未评估 | Codex 骨架、两处 TODO 补全、验证、逐行讲解与总结 | 正式版节点/数值、既有memcheck/普通计时及2026-11-09正式NSYS node对照通过；指针/句柄、节点检查和间隙已讲解并总结；个人运行/读图与独立解释待验收 |
 | 17 编译产物 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、两处命令补全、验证、PTX/SASS讲解与总结 | 正式构建/全量数值/memcheck及入口查看通过；用户已提供nvdisasm命令与完整输出，寄存器/地址/产物关系已讲解；个人编译/Runtime运行与完整独立解释待验收 |
-| 18 Driver | TODO | 45～60min | — | 未评估 | 未开始 | — |
+| 18 Driver | RUNNING | 45～60min | — | 未评估 | Codex 骨架、两处 TODO 补全、验证、context探针及逐段讲解总结 | 正式版全量数值/memcheck和context探针已有验证；指针参数、隐式context选择/恢复、资源归属与清理已讲解总结；个人运行与完整独立解释待验收 |
 | 19 内存复用 | TODO | 45～60min | — | 未评估 | 未开始 | — |
 
 后续选修仅在用户启动且 PLAN 写明范围后添加，未启用的选修不影响首轮完成。
@@ -758,3 +758,45 @@ NOTE记录用户的真实脚本阅读问题，按命令→输入/变量→分支
 此前讲解中Codex已只读运行cuobjdump和nvdisasm -c -g，确认当前cubin的vector_add/sm_75及源码21～24行关联，并提取普通可执行文件中的PTX。Ch18仅解释cuInit/device/primary context/current/module/function/launch流程，未生成章节、实际加载外部模块或进行Driver启动；外部PTX/cubin加载执行继续记NOT RUN。PTX/SASS后缀、ELF内部字段、JIT缓存和跨架构实验不增加为本章门槛。
 
 本次只修改NOTE与RECORD并持久保存用户原始查看输出，核对文档链接、证据哈希及diff格式，未修改CUDA源码/编译脚本，没有临时尝试文件、新依赖、计划偏离或额外Claude审阅需要，未启动Claude、未提交或推送Git。当前Ch17保持RUNNING，掌握度未评估；个人产物查看已有输出，个人编译/Runtime运行与完整独立解释仍待验收。实际学习及文档整理耗时未记录。
+
+## 2026-11-09：Ch18 Driver 加载与启动骨架、讲义及预检
+
+按用户“生成CH18内容”的要求，对应 PLAN 阶段D，新增 `CH18/driver_vector_add.cpp`、`CH18/compile.sh` 和 [Driver 启动讲义](chapters/18_driver_launch.md)，同步 PLAN 目录/变更记录与 NOTE 预习入口。独立 host 目录使用普通 C++ 和 Driver API，按既定方案复用 Ch17 的 sm_75 cubin；与 Runtime 对照保持相同输入、n1000/float32/grid8/block128、每数组4000字节与 CPU double reference。骨架完整提供 primary context retain/current/恢复/release、内存分配/上传/哨兵/回读/释放、等待与全量校验，保留模块加载/入口查找和参数组织/launch 两处 TODO。重点为 context/module/function 使用关系、参数变量地址与设备地址值，不扩展 PTX JIT、性能、Hook 或 API Inventory。
+
+现场核验 GTX1650 / CC7.5 / 14SM / 4096MiB、KMD610.88、DriverAPI13030，NVCC12.9.86、g++13.3.0、Compute Sanitizer2025.2.1.0，CUDA_LAUNCH_BLOCKING unset。重建 Ch17 Runtime 和 cubin，以及正式 Driver 骨架均无警告；Runtime 全量1000项 mismatches0、最大误差0、退出0。正式脚本语法与从/tmp调用通过，正式骨架按预期提示 TODO(1)、退出2；脚本及host多余参数均退出2。
+
+教学方临时在 `build/CH18/preflight/` 补全 API，先验证只完成模块部分时查找成功、提示 TODO(2)、退出2且未提交；完整临时版本实际加载 `build/CH17/vector_add.cubin`，全量1000项 mismatches0、最大误差0、退出0，memcheck padding32 零错误。从/tmp传入cubin绝对路径也正确；故意使用缺失路径按预期得到 CUDA_ERROR_FILE_NOT_FOUND、退出1，属于加载失败对照。ldd确认正式与临时host程序均使用WSL的libcuda.so.1，无libcudart依赖。API签名与primary context/参数复制语义核对本机cuda.h和官方CUDA12.9.1文档，链接写入讲义。
+
+完整命令、版本、cwd、源码/产物SHA-256、临时补全源码、输出与预期/实际退出码见 [预检日志](../reports/CH18/preflight-2026-11-09.txt)。临时源码已删除，内容保留在日志；module_only/complete预检可执行文件保留用于复盘。正式源码仍保留两处TODO，正式Driver加法路径为NOT RUN；临时完整版的校验不冒充正式实现验收。无计时、NSYS、NCU、PTX加载/JIT、racecheck或synccheck，本例无shared协作/barrier，不追加这些门槛。build/reports均为本地产物，默认不进Git。
+
+内容生成、临时补全与验证由Codex完成，用户关键实现、个人重编译/运行与独立解释待验收；Ch18记RUNNING、掌握度未评估，前章状态不变。计划学习用时45～60分钟，实际学习与工程执行耗时均未记录。无计划偏离、新依赖或额外Claude审阅需要，未启动Claude，未生成Ch19、未提交或推送Git。遗留为两处练习与本章个人验收。
+
+## 2026-11-10：Ch18 两处 TODO 补全与正式验证
+
+按用户“完成TODO1和TODO2”的要求，Codex 修改 `CH18/driver_vector_add.cpp`：`load_vector_add()` 用 `cuModuleLoad(module, path)` 加载模块，并以 `cuModuleGetFunction(function, *module, "vector_add")` 查找入口；`launch_vector_add()` 用 `void* args[] = {&d_a, &d_b, &d_c, &n}` 组织参数，再以 grid×1×1/block×1×1、dynamic shared0、默认stream启动。API均经CU_CHECK检查，删除原占位、提示及无用参数抑制，补充模块句柄与参数复制的中文注释。既有context、内存、等待与全量校验流程不变；两函数保留骨架bool接口，成功返回true、API错误立即报错退出。同步PLAN目录、NOTE入口和讲义当前状态，保留11月9日临时预检历史。
+
+现场GTX1650 / CC7.5 / 14SM / 4096MiB、KMD610.88、DriverAPI13030、NVCC12.9.86、g++13.3.0、Compute Sanitizer2025.2.1.0，CUDA_LAUNCH_BLOCKING unset。本机cuda.h核对module/launch签名及kernelParams复制语义；重建Ch17 cubin/Runtime和正式Driver host均成功、无警告，未修改Ch17源码。Runtime与Driver均以n1000、float32、grid8/block128、每数组4000字节运行，全量mismatches0、最大误差0、退出0。正式Driver的memcheck padding32零错误、退出0，实际使用 `build/CH17/vector_add.cubin`，不再是临时补全版结果。
+
+从/tmp通过cubin绝对路径启动正式程序成功；缺失文件按预期报CUDA_ERROR_FILE_NOT_FOUND、退出1，host多余参数按预期退出2。ldd确认正式程序使用WSL libcuda.so.1、无libcudart依赖。完整版本、命令、cwd、原始输出、预期/实际退出码与源码/产物SHA-256见 [正式验证日志](../reports/CH18/completed-2026-11-10.txt)。本轮未新建临时实现、未删除历史证据；没有计时、NSYS、NCU、PTX加载/JIT、racecheck或synccheck，不增加性能或Runtime内部调用映射结论。
+
+本次实现和验证由Codex完成，个人重编译/运行与完整独立解释仍待验收；Ch18保持RUNNING、掌握度未上调，实际学习及工程执行耗时未记录。按PLAN阶段D执行，无范围偏离、新依赖或额外Claude审阅需要；未启动Claude、未生成Ch19、未提交或推送Git。
+
+## 2026-11-10：Ch18 CPU线程与context打印探针
+
+用户表示仍不理解CPU线程与context关系，要求在三次API之间打印previous/context。Codex在 `CH18/driver_vector_add.cpp` 新增只读 `print_context_probe()`，打印Linux/WSL OS线程TID、局部变量地址/句柄大小、previous/context值、实时查询的current、设备、primary active/flags及current flags。在get前后、retain后、set后、restore后、release后共六处采样；release后显式清空context局部变量，注释说明驱动不会替用户改写变量。未新建context、未增加worker线程或依赖，既有kernel、数据、启动和校验保持不变。PLAN记录本次用户授权的教学观测，NOTE和讲义补充真实疑问、资源归属解释与读图表。
+
+普通运行实测同一cpu_tid361332：变量地址为0x7ffd70dd8c10/0x7ffd70dd8c18、句柄大小8字节。retain前previous/context/current空、primary active0；retain后context=0x5635a1dd03f0、current空、active1；set后current等于context、device0；restore后current空而active1；release后active0。primary_flags0x0、current_flags0x8作为原始配置返回记录，不推断实现差异。memcheck独立运行的TID/地址不同，关系相同；地址不是可解码的GPU状态，active不是GPU忙碌或引用次数。此单线程观测不声称验证跨线程共享行为。
+
+现场仍为GTX1650 / CC7.5 / 14SM / KMD610.88 / DriverAPI13030、g++13.3.0、Compute Sanitizer2025.2.1.0，CUDA_LAUNCH_BLOCKING unset。正式版本重编译无警告，n1000/float32/grid8/block128、每数组4000字节，全量mismatches0、最大误差0、退出0；memcheck padding32零错误、退出0。查询签名核对本机cuda.h与CUDA12.9.1官方context/primary文档。完整命令、输出、退出码与源码/cubin/可执行文件哈希见 [探针日志](../reports/CH18/context-probe-2026-11-10.txt)。未生成临时实现、未删除历史证据、未计时或采集profiler。
+
+探针实现、工具执行与讲解由Codex完成；用户仍有明确理解难点，Ch18保持RUNNING、掌握度未上调，个人运行/解释待验收，实际学习与工程耗时未记录。无原课程范围偏离、额外Claude审阅需要或Git提交/推送。
+
+## 2026-11-11：Ch18 本章总结与证据复核
+
+按用户“总结本章内容”的要求，只更新NOTE与RECORD。NOTE补充页首阅读入口和页末“今日完成任务、基本概念、踩坑记录、八股自测”总结，覆盖实际提问：CU_CHECK与返回值/输出参数，context/module/function及不透明句柄，module/function指针的指针与args取值位置的差异，launch各参数和GPU完成边界，.cpp/.cu职责与cubin/SASS执行链，CPU线程current绑定、previous保存恢复、primary active，隐式context参数、资源归属/物理显存共享、跨context复制/访问，以及module卸载和骨架遗留false分支。用户问题以红色标签忠实归纳，核心理解用mark；概念说明不记为用户已独立掌握。
+
+只读核对当前CH18源码/脚本、CH17kernel/构建脚本、正式cubin/Runtime/Driver可执行文件与11月10日两份日志。当前Driver源码、脚本、cubin和可执行文件哈希与context-probe日志全部一致；CH17源码/脚本、cubin和Runtime可执行文件与completed日志一致。无探针completed日志的Driver源码/可执行文件与当前不同，是之后增加探针的预期版本变化，不将历史错误路径检查冒充当前探针构建的新测试。已有数值/环境/命令和证据见 [正式日志](../reports/CH18/completed-2026-11-10.txt) 与 [探针日志](../reports/CH18/context-probe-2026-11-10.txt)：GTX1650/CC7.5/14SM、KMD610.88、DriverAPI13030、n1000/float32/grid8/block128/每数组4000字节，mismatches0、最大误差0，Driver memcheck padding32零错误。probe普通及Sanitizer输出均显示retain后context非空/current空、set后相同、restore后current空、release后primary active0；没有把TID/地址当成固定数值或GPU状态编码。
+
+总结明确当前load/launch包装函数成功返回true、API失败CU_CHECK直接exit，因此main原false清理分支不可达；这是现有教学骨架的控制流限制，本轮未据此改动源码或错误处理方式。context资源关系和current线程绑定属于公开语义，内部存储/TLS/调度实现未验证；跨context、peer、IPC、VMM、多卡、NVRTC/CuPy仅概念连接或官方接口用途，不声称本机运行。没有计时、NSYS、NCU、PTX JIT或Runtime/Driver严格映射结论。
+
+用户多次表示仍不理解context和指针层级，并尝试复述后继续追问；尚无用户个人重编译/运行或完整独立解释的验收证据。实现、probe及验证由Codex完成，Ch18保持RUNNING、掌握度未上调，实际学习与文档整理耗时未记录。文档检查包括本轮新增本地链接、历史证据哈希和diff格式；没有修改CUDA/C++源码、构建脚本或PLAN，没有重编译/执行GPU/重新采集profiler、创建临时实现或删除历史产物，无计划偏离、新依赖或额外Claude审阅需要，未提交或推送Git。

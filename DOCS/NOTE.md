@@ -74,6 +74,24 @@ Codex 已重新编译正式脚本三种输出，Runtime 全量数值与 memcheck
 
 先用编辑器或 `less CH17/compile.sh` 阅读源码，再用 `bash -n CH17/compile.sh` 检查语法（不执行主体命令）。需要观察参数展开时，`bash -x CH17/compile.sh ptx` 会显示并实际执行命令，因而也会重新编译输出；`-x` 不是只读预览。语法检查也不保证命令路径或功能正确。参数语义参考 [GNU Bash 手册](https://www.gnu.org/software/bash/manual/bash.html#The-Set-Builtin)。本次提问说明用户开始关注脚本的执行流程，不据此补记为已经独立掌握 Bash。
 
+## Ch18 阅读入口（2026-11-09）
+
+[Driver 启动讲义](chapters/18_driver_launch.md) 接着 Ch17 的独立 cubin：先建立当前线程使用 GPU 资源的 context，再加载模块、按名字找到 vector_add，最后传参启动。host 源码不再包含 kernel 定义；GPU 仍执行相同的 sm_75 加法，数据和线程配置保持一致。本节比较启动路径，不做性能结论或 Runtime/Driver 内部调用的一一映射。
+
+`CH18/driver_vector_add.cpp` 原有两处 TODO，2026-11-10 已按用户要求由 Codex 补全：`cuModuleLoad` 写出模块句柄，`cuModuleGetFunction` 从 `*module` 查找 vector_add；启动时以 `void* args[] = {&d_a, &d_b, &d_c, &n}` 按参数顺序提供 host 变量地址，再用 `cuLaunchKernel` 提交。context、内存、等待和校验由骨架提供。阅读重点是“GPU 地址值”与“保存该值的 host 变量地址”：Driver 从参数数组指向的 host 变量复制参数值，kernel 随后拿到 GPU 地址并访问数组。加载成功、提交返回、执行完成和数值正确分别对应不同检查点，不能互相替代。
+
+此前隔离临时版本预检为历史证据；2026-11-10 Codex 已重建并运行正式版本，实际加载 Ch17 cubin，1000项全量校验与 memcheck 均通过。两处实现及验证由 Codex 完成，个人运行与独立解释待验收，不记为用户已经独立掌握；进度及证据统一见 RECORD。
+
+**用户提问：CPU线程和context是什么关系，context具体保存什么，能否打印previous/context？**
+
+CPU线程在这里就是运行main、调用这些cu API的host执行线程。驱动记录“这个线程当前选用哪个context”，后续cuModuleLoad、cuMemAlloc等据此选择资源所属环境。context可理解为驱动管理的CUDA资源账本，关联设备、分配的GPU内存、已加载模块及函数、stream/event等对象和配置；这是功能层面的理解，不代表这些内容都作为可见字段放在一块结构体里。primary context属于进程内的设备，多个CPU线程可以使用同一个context，各线程的current绑定分别管理；不是每个CPU线程必须新建一份context。[官方context管理](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-driver-api/group__CUDA__CTX.html)。
+
+`previous`与`context`是两个host局部变量，里面只存句柄值。打印`&context`看到变量本身所在位置，打印`context`看到其保存的句柄；不透明句柄不能解引用查看内部资源或当作GPU数组读取。当前源码已加入`print_context_probe()`，查询并打印OS线程TID、两个句柄、线程current、设备和primary active/flags。普通运行实测：retain前全空且active0；retain后context非空、current仍空、active1；set后current等于context且设备为0；restore后current空但active仍1；release后active0，代码另行将局部context清空。`previous`本次一直为空，表示进入这段前该线程未绑定context，不表示没有显卡。
+
+打印的地址/TID每次可能变化，句柄不是完整GPU状态快照，也不编码资源列表。`primary_active`是context是否活跃，不能作为GPU忙碌率或kernel是否在运行的证据；flags是配置位，不表示内存用量或任务数。本次primary_flags=0x0、current_flags=0x8来自各自查询的原始返回，未据差异推导内部实现。探针只演示当前单CPU线程的绑定变化，不新增多线程或新context实验。用户明确表示此前仍不理解，保留为实际理解难点，不能把Codex输出等同独立掌握。
+
+本页末尾的“2026-11-11 Ch18”总结整理本章后续实际提问，包括输出参数与args输入参数的区别、launch配置、context资源归属/隐式选择、previous恢复、跨context数据和module生命周期。实现与工具验证由Codex完成，讨论和探针输出不替代个人独立验收。
+
 ## 首轮贯穿的观察问题
 
 | 观察问题 | 将使用的程序证据 |
@@ -1791,3 +1809,139 @@ nvdisasm -c -g build/CH17/vector_add.cubin
 沿block1/thread3说明参数读取、i=131、i×4=524字节偏移、输入读取和输出写回，分别解释%rd8、[%rd8]、cvta.to.global.u64和st.global.f32，指出哪里处理64位地址、哪里读写32位数据。再从SASS找到边界退出、两次读取、一次加法和一次写入，并说明debug/metadata与.text的区别，不能用寄存器声明数或文件大小推出性能。
 
 最后亲自生成并查看两种device产物、运行Runtime校验，指出现有证据没有证明的外部模块加载步骤。能复述局部概念不替代完整验收，Ch17仍保持RUNNING；不追加SASS编码、ELF逐字段、JIT缓存或Ch18实现作为本章门槛。
+
+## 2026-11-11 Ch18：Driver启动、指针参数与CUDA context
+
+### 今日完成任务
+
+围绕 [Driver host源码](../CH18/driver_vector_add.cpp)、[构建脚本](../CH18/compile.sh) 和 [本章讲义](chapters/18_driver_launch.md)，串起“初始化→选择设备/context→加载Ch17 cubin→查找vector_add→准备显存和参数→启动→等待→回读校验→清理”的流程。GPU仍执行Ch17的向量加法；变化是host显式使用Driver API，未新增算法或性能比较。
+
+11月9日的骨架和隔离预检、11月10日的两处TODO正式补全和context打印探针均由Codex完成。用户主动逐段追问CU_CHECK、primary context、句柄、指针的指针、args与launch参数、Runtime/Driver组织方式、previous恢复、资源隔离和卸载；曾明确表示仍不理解context及指针层级，随后尝试复述并继续追问。这些是实际学习过程和理解难点，尚无用户个人重编译/运行或完整独立解释的验收证据。本次总结核对现有源码、构建产物和日志，没有重新运行GPU。
+
+### 基本概念
+
+**从cubin到GPU执行，以及.cpp/.cu的职责**
+
+<span style="color:red">用户提问：cuLaunchKernel是不是执行对应cubin的SASS？当前cpp只是加载已有cubin，真实开发有什么场景？</span>
+
+Ch17的.cu同时包含kernel和Runtime版main；生成cubin时只输出device程序。Ch18的.cpp没有kernel定义，通过g++编译、链接WSL libcuda，实际GPU程序来自 `build/CH17/vector_add.cubin`。`cuModuleLoad`准备模块，`cuModuleGetFunction`取得入口，`cuLaunchKernel`提交工作，GPU执行该入口对应的机器指令；SASS文本是反汇编表示，不是另行读取执行的脚本。后缀不强制选择API：.cu也可调用Driver，普通.cpp也可使用Runtime接口，具体取决于代码与构建方式。
+
+实际用途包括把预编译kernel与host程序分开发送/加载，以及运行时生成CUDA代码后用NVRTC编译、Driver加载启动；CuPy RawModule也公开支持加载cubin/PTX并按名取kernel。这些是官方接口用途，不是本机新增实验。参考 [NVRTC 12.9示例](https://docs.nvidia.com/cuda/archive/12.9.1/nvrtc/index.html)、[CuPy RawModule](https://docs.cupy.dev/en/stable/reference/generated/cupy.RawModule.html)。本章未测框架、JIT或首次加载开销，不推断Runtime/Driver调用严格一一对应。
+
+**CU_CHECK检查什么，返回值与输出参数如何分工**
+
+<span style="color:red">用户提问：为什么需要CU_CHECK？为什么cuCtxSetCurrent直接传context，其他调用却传地址？</span>
+
+Driver API通常返回CUresult状态，CU_CHECK是本项目的宏：先执行调用，再检查是否CUDA_SUCCESS，失败打印API/文件/行号/错误并exit。实际结果如context/module/function通过输出参数写回。它不提供同步，也不会让launch返回自动等同GPU完成。
+
+CUcontext/CUmodule/CUfunction本身是指针形式的不透明句柄；句柄是驱动交给程序、供后续API指认对象的值。变量中只有句柄，不包含整个对象；不能通过解引用读取驱动内部字段。`cuCtxSetCurrent(context)`需要已有句柄作为输入，所以传context；`cuDevicePrimaryCtxRetain(&context, device)`要把句柄写进调用方变量，所以传变量地址。
+
+**为什么module/function需要“指针的指针”**
+
+<span style="color:red">用户提问：为什么cuModuleGetFunction传function和*module？为什么用指针变量的地址这么绕的方式？</span>
+
+先看main：`CUmodule module=nullptr; CUfunction function=nullptr;`，再调用 `load_vector_add(path, &module, &function)`。普通函数参数按值传递；要改写main中的指针变量，就提供该变量所在地址。包装函数的 `CUmodule* module` / `CUfunction* function` 已分别保存这两个输出位置。为便于理解，可以在脑中将其改名为out_module/out_function：
+
+```cpp
+cuModuleLoad(out_module, path);  // 往main的module变量写模块句柄
+cuModuleGetFunction(out_function, *out_module, "vector_add");
+// out_function：新结果写到哪里；*out_module：到哪个已有模块里查找
+```
+
+<mark>两层指针对应两层关系：先找到保存句柄的变量，再读写其中的句柄值。</mark> `*module`只读出main变量里保存的模块句柄，没有解引用驱动内部的模块对象。`extern "C"`让Ch17产物保留易查找的vector_add名字。
+
+**args不是输出位置，而是启动参数的取值位置**
+
+<span style="color:red">用户提问：void* args[] = {&d_a, &d_b, &d_c, &n}是干什么的？</span>
+
+GPU入口参数顺序是 `a, b, c, n`。args四项分别指向CPU上保存这些参数值的变量；Driver根据kernel image中的参数信息，从这些位置复制实际值。前三项复制GPU数组地址，第四项复制int1000。void*使不同类型变量的地址可以放进同一个数组，不改变被复制的数据类型或参数顺序。
+
+例如CPU变量d_a里存着GPU地址0x80000000，args[0]保存的是这个CPU变量的地址；Driver读出其中的0x80000000，kernel的a收到这个GPU地址，随后读取显存。kernel不会拿CPU变量地址去访问数组。<mark>同样出现&，module/function输出参数是让API写回新句柄；args中的地址是让Driver读取已有参数值，不能混为一谈。</mark> 本机CUdeviceptr为8字节、int为4字节；数组地址值被传递，不等于整个数组在launch时随参数再次复制。[官方kernelParams语义](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-driver-api/group__CUDA__EXEC.html)。
+
+**cuLaunchKernel配置与完成边界**
+
+<span style="color:red">用户提问：cuLaunchKernel的输入参数各自是干什么的？</span>
+
+| 本例参数 | 作用 |
+| --- | --- |
+| function | 从模块中找到的vector_add入口句柄 |
+| grid,1,1 | X/Y/Z方向block数量，本例8×1×1 |
+| block,1,1 | 每个block的X/Y/Z线程数量，本例128×1×1 |
+| 0 | 每block额外dynamic shared字节数，不是全部显存用量 |
+| 第一个nullptr | 使用默认stream |
+| args | 四个kernel参数的取值位置列表 |
+| 最后一个nullptr | 不使用extra打包参数方式 |
+
+总共1024个线程覆盖1000个float32元素，额外24个线程由kernel的 `i<n` 保护跳过。提交成功后，main仍需检查 `cuCtxSynchronize()` 的完成结果，再D2H与CPU double reference全量比较；输出先填NaN，以检查错算和漏写。
+
+**context管理什么，在哪里用到了它**
+
+<span style="color:red">用户多次提问：CUDA context到底是什么、里面有什么，CPU线程与它什么关系？能否打印previous/context？</span>
+
+本例context是驱动在GPU0上管理代码、显存、工作队列及配置的运行环境，功能上关联设备、地址空间/内存分配、module/function、stream/event和配置。数组数据实际在显存，context维护资源归属和管理状态；这不是公开的结构体字段清单，更不是保存在局部变量里的整张GPU状态快照。
+
+```text
+CPU线程执行main，记录当前选中的context
+    → cuModuleLoad：模块加载到当前context
+    → cuMemAlloc：在当前context关联设备/地址空间中分配
+    → cuLaunchKernel：使用加载的function和分配的数组提交计算
+    → cuCtxSynchronize：等待当前context的工作完成
+```
+
+`cuCtxGetDevice` / `cuCtxGetFlags`是探针查询当前context设备和配置的直接例子。很多API不再显式传context，是因为驱动维护了调用线程的current绑定；它们可以从这份线程状态取得所需环境。官方模型为每host线程的current context栈；具体内部存储、缓存与调用路径未公开，讲解中的“隐含参数”伪代码不冒充驱动源码。[官方context说明](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-c-programming-guide/index.html#context)。
+
+**previous、retain、current与active不是同一件事**
+
+<span style="color:red">用户提问：是不是先中断CPU任务、把GPU上下文设成CPU现场？如果不是，为什么保存previous并恢复？previous在本例是什么？primary_active又是什么？</span>
+
+CPU始终顺序执行main中的普通API调用。GetCurrent查询线程原来的CUDA绑定，retain取得primary句柄并保持使用引用，set才改变线程选用的CUDA环境；这不等于操作系统保存/恢复CPU寄存器和执行现场，也不让CPU线程变成GPU kernel线程。previous与context均为CUcontext，分别保存“原来的选择”与“本段要用的句柄”，不保证一定指向不同对象。
+
+11月10日探针实际关系如下，H只是非空句柄的缩写：
+
+| 阶段 | previous | context | 线程current | primary_active |
+| --- | --- | --- | --- | --- |
+| after_get | 空 | 空 | 空 | 0 |
+| after_retain | 空 | H | 空 | 1 |
+| after_set | 空 | H | H | 1 |
+| after_restore | 空 | H | 空 | 1 |
+| after_release | 空 | 空 | 空 | 0 |
+
+本例previous=nullptr，没有一个先前绑定的context要切回；最后set(nullptr)解除绑定。保存/恢复是可复用代码中常见的临时选择管理：外层若用A，本段临时用B，返回前恢复A，避免外层后续的无显式context调用意外落到B。例如 `cuMemAlloc(&p, bytes)` 没有device/stream参数，`cuCtxSynchronize()`连参数都没有，二者会依赖current；已有A的地址和句柄不会因切换而自动变成B的资源。
+
+primary_active是查询输出的0/1，表示primary是否活跃，不是GPU忙碌率、线程绑定状态或引用计数。retain后active1但current仍空，正好区分这两个概念；本例释放最后引用后active0。release不会改写局部context变量，探针里最后的nullptr由代码显式赋值。地址、TID和8字节句柄大小不能解释成内部对象布局；primary_flags0x0/current_flags0x8只是本机不同查询的原始配置返回，不推导内部实现差异。
+
+**资源归属与跨context数据：只做概念连接**
+
+<span style="color:red">用户提问：context像Python虚拟环境吗？不同context互不影响吗？显存独立吗？跨context参数怎么传？</span>
+
+venv主要管理解释器/包依赖，CUDA context管理GPU资源。对本章cuMemAlloc普通分配，不应假定A的device指针可直接用于B的kernel；但同卡的两个context共同消耗物理显存、计算能力和带宽，不各自独享一整张卡，也不保证性能互不影响。资源归属/访问权限与物理硬件共享需要分开理解。
+
+标量n可以分别按值传给两边kernel；device地址的数值被复制，不代表数组被复制或访问权限自动开放。跨context数组可显式复制（如 `cuMemcpyPeer(dst_B, ctxB, src_A, ctxA, bytes)`，或经host中转），也可在支持条件下用peer访问等共享机制，仍需安排生产者写完与消费者读取的依赖。若本来只是同一程序的两个kernel协作，可放在同一context内复用buffer。参考 [跨context复制](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-driver-api/group__CUDA__MEM.html)、[peer访问](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-driver-api/group__CUDA__PEER__ACCESS.html)；本机没有运行多context、peer、IPC、VMM或多卡实验，不增加为本章门槛。
+
+**清理顺序、module不卸载和保留的失败分支**
+
+<span style="color:red">用户提问：if(!load_vector_add(...))这一段干什么？module不unload会怎样？</span>
+
+正常结束先释放d_c/d_b/d_a，再卸载module、恢复previous并release本程序的primary使用引用。unload释放已加载模块相关资源，不删除磁盘cubin，也不代替单独分配数组的cuMemFree；模块卸载后旧module/function句柄不能继续使用。有意保留模块复用是正常策略；反复加载不用的模块而不卸载，资源可能累积。本例最后一个primary引用释放时会reset并清理相应资源，因此省略unload通常不影响已完成结果，但不能把所有release都当成最后引用，也不依赖其他使用者结束才清理自己的模块。[官方module](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-driver-api/group__CUDA__MODULE.html)、[primary release](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-driver-api/group__CUDA__PRIMARY__CTX.html)。
+
+<mark>当前load_vector_add成功固定返回true，API失败则CU_CHECK直接exit；因此main中的if(!load_vector_add(...))清理分支已无法通过这两类路径进入。</mark> 它是原TODO骨架遗留，不是当前可靠的API失败清理路径。launch包装函数也保留“成功true、错误exit”的接口。本次总结只解释实际控制流，未把短练习重构成生产级错误资源管理框架。
+
+**已有验证及其边界**
+
+11月10日 [正式补全日志](../reports/CH18/completed-2026-11-10.txt) 记录Runtime/Driver全量1000项正确、最大误差0、正式Driver memcheck padding32零错误，另检查缺失cubin报CUDA_ERROR_FILE_NOT_FOUND/退出1、多余host参数退出2、从/tmp传绝对路径成功，以及ldd无libcudart依赖。之后增加探针，当前源码/脚本/cubin/Driver可执行文件SHA-256均与 [探针日志](../reports/CH18/context-probe-2026-11-10.txt) 一致。该日志的GTX1650/CC7.5/14SM、KMD610.88、DriverAPI13030、g++13.3.0、Compute Sanitizer2025.2.1.0为当时实测；n1000/float32/grid8/block128、每数组4000字节，普通及memcheck运行均PASS，内存检查零错误。
+
+无探针正式日志里的Driver源码/可执行文件哈希与当前不同，是后续增加探针的预期结果，不把两份构建冒充同一版本。此次仅核对已有日志和哈希，没有新编译/运行、性能计时或profiler采集；所有计数和环境均按历史证据引用。没有Runtime/Driver内部调用映射或性能比较结论，所有实现与工具验证仍归Codex辅助。
+
+### 踩坑记录
+
+本章真实理解难点集中于把“CPU线程的CUDA环境选择”当成操作系统CPU现场切换、把句柄值当成完整GPU状态、把primary active当成GPU正在执行、把previous误认为一定已有另一个context，以及认为所有CUDA调用都显式指定了device/stream。已沿本例的nil→H、current和active变化及无context参数的分配/同步说明，但不能据此补记独立掌握。
+
+指针部分需要继续区分：句柄变量与句柄值、输出位置与args的取值位置、`*module`读取句柄与解引用驱动内部对象、复制GPU地址与复制数组。用户曾尝试说明指针的指针，随后明确表示“有点扯不清楚”，保留为待自测内容。另需避免把模块加载成功等同kernel执行完成、把未进入的false分支当作真实错误回收、把context隔离解释为独占物理显存或任意跨context指针可用。
+
+### 八股自测
+
+不看讲义，从cubin路径沿context→module→function→args→launch→同步→回读说明整条链，并用一个具体地址例子解释两种&的用途：为什么module/function要输出位置，而args提供输入参数取值位置；指出grid8/block128如何覆盖1000项，以及两个nullptr各代表什么。
+
+再结合自己的探针输出，说明retain与set的区别、previous为什么可能为空、active为什么不能证明GPU忙碌，以及若外层使用A而函数返回后current仍为B，cuMemAlloc/cuCtxSynchronize会受什么影响。能指出当前false清理分支为何不执行、module卸载与显存释放各负责什么即可；跨context/peer/JIT只保留概念边界，不增加实现验收。
+
+后续独立运行正式程序并解释上述关键关系，再按PLAN判断验收。当前Ch18保持RUNNING，个人运行和完整独立解释待补齐，不以Codex预检、指针复述或探针打印单独认定课程完成。
