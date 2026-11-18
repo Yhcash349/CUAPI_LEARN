@@ -29,7 +29,7 @@
 | 16 Graph | RUNNING | 45～60min | — | 未评估 | Codex 骨架、两处 TODO 补全、验证、逐行讲解与总结 | 正式版节点/数值、既有memcheck/普通计时及2026-11-09正式NSYS node对照通过；指针/句柄、节点检查和间隙已讲解并总结；个人运行/读图与独立解释待验收 |
 | 17 编译产物 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、两处命令补全、验证、PTX/SASS讲解与总结 | 正式构建/全量数值/memcheck及入口查看通过；用户已提供nvdisasm命令与完整输出，寄存器/地址/产物关系已讲解；个人编译/Runtime运行与完整独立解释待验收 |
 | 18 Driver | RUNNING | 45～60min | — | 未评估 | Codex 骨架、两处 TODO 补全、验证、context探针及逐段讲解总结 | 正式版全量数值/memcheck和context探针已有验证；指针参数、隐式context选择/恢复、资源归属与清理已讲解总结；个人运行与完整独立解释待验收 |
-| 19 内存复用 | TODO | 45～60min | — | 未评估 | 未开始 | — |
+| 19 内存复用 | RUNNING | 45～60min | — | 未完整评估 | Codex 骨架、TODO补全、验证、NSYS及受控对照、讲解总结 | 正式数值/计数/memcheck/普通计时通过；NSYS与诊断边界已记录；用户已正确复述“复用减少反复申请释放开销，Event差距不必巨大”；个人运行与完整独立解释待验收 |
 
 后续选修仅在用户启动且 PLAN 写明范围后添加，未启用的选修不影响首轮完成。
 
@@ -800,3 +800,61 @@ NOTE记录用户的真实脚本阅读问题，按命令→输入/变量→分支
 总结明确当前load/launch包装函数成功返回true、API失败CU_CHECK直接exit，因此main原false清理分支不可达；这是现有教学骨架的控制流限制，本轮未据此改动源码或错误处理方式。context资源关系和current线程绑定属于公开语义，内部存储/TLS/调度实现未验证；跨context、peer、IPC、VMM、多卡、NVRTC/CuPy仅概念连接或官方接口用途，不声称本机运行。没有计时、NSYS、NCU、PTX JIT或Runtime/Driver严格映射结论。
 
 用户多次表示仍不理解context和指针层级，并尝试复述后继续追问；尚无用户个人重编译/运行或完整独立解释的验收证据。实现、probe及验证由Codex完成，Ch18保持RUNNING、掌握度未上调，实际学习与文档整理耗时未记录。文档检查包括本轮新增本地链接、历史证据哈希和diff格式；没有修改CUDA/C++源码、构建脚本或PLAN，没有重编译/执行GPU/重新采集profiler、创建临时实现或删除历史产物，无计划偏离、新依赖或额外Claude审阅需要，未提交或推送Git。
+
+## 2026-11-11：Ch19 内存复用骨架与教学预检
+
+用户明确要求“生成CH19内容”。按PLAN阶段D最后一章新增 `CH19/memory_reuse.cu`、`CH19/compile.sh` 和 [内存复用讲义](chapters/19_memory_reuse.md)，更新PLAN实际目录及授权依据，NOTE新增阅读入口与自测。固定n1000/float32/grid8/block128、每数组4000字节、每批32轮，逐轮输入和预期输出变化；只改变三块device缓冲区的生命周期。骨架提供完整per_step基线、逐轮H2D/kernel/等待/D2H、NaN哨兵、全部32轮CPU double reference、Runtime调用计数、3次预热/21次交替顺序测量及NSYS采集范围，只保留prepare_reuse_buffers一处循环外准备TODO，循环后释放已提供。未新增完整allocator、async pool或后续选修。
+
+现场复核GTX1650/CC7.5/4GB、KMD610.88、NVCC12.9.86、Runtime12090、DriverAPI13030、NSYS2026.4.1和Compute Sanitizer2025.2.1，CUDA_LAUNCH_BLOCKING unset。正式构建与临时补全版使用-O2/-lineinfo/sm_75/-Wall/-Wextra，无警告；脚本bash -n通过。正式check per_step检查32000项，mismatches0、最大误差0，整批及循环内malloc/free均96/96；memcheck padding32加leak-check full零错误、泄漏0字节。正式check both和bench both预期提示reuse NOT RUN并退出2，bench没有发布计时；trace both参数拒绝路径也符合预期。
+
+隔离临时副本只把复用准备函数补成调用allocate_buffers并返回true；两种策略各32000项全量校验通过、最大误差0，memcheck及leak-check零错误/零泄漏。临时reuse整批malloc/free为3/3，循环内0/0；per_step保持96/96。普通计时中位数（μs/批，3次预热/21次重复）：per_step的host_loop/host_lifecycle/Event区间合计为24154.982/24155.053/763.168，reuse为4568.006/5287.791/450.592。CPU loop包含传输、初始化、Event操作与等待，lifecycle额外包括循环外准备/释放；Event不覆盖分配路径且短区间可能包含提交衔接空隙，不将差值解释为纯分配成本或GPU加法指令加速。数据仅限本机本次同步方式，不预设固定加速比。
+
+独立NSYS通过cudaProfilerApi只采预热后的目标循环，排除reuse准备/清理；SQLite结构化核对per_step的malloc/free各96次，reuse各0次，两者各32个kernel、64次H2D、32次D2H和32次memset。首次匹配未处理原始API的_v3020后缀导致解析断言失败，属于后处理匹配问题；修正为保留raw name、另去除末尾版本后缀匹配后核对通过，GPU实验本身无失败。完整命令/退出码/环境/临时补全说明与源码哈希见 [preflight日志](../reports/CH19/preflight-2026-11-11.txt)，结构化计数及正式源码/二进制哈希见 [trace-counts](../reports/CH19/trace-counts-2026-11-11.json)；两份preflight-{per_step,reuse}-2026-11-11.nsys-rep与SQLite保留在reports/CH19。正式构建在preflight日志建立前完成，命令见章节脚本，编译退出0且无诊断。临时补全源码及二进制已自动清理，正式TODO完整保留；没有运行NCU、提交或推送Git。
+
+用户本次完成部分为提出生成需求，没有个人实现、运行或解释证据；辅助程度为Codex骨架、讲义和隔离补全预检，不算用户完整答案或学习验收。Ch19保持RUNNING仅表示骨架及工程预检已运行，掌握度未评估，实际学习与工程准备/agent耗时均未记录。下一步由用户补TODO、重编译、运行双策略并解释生命周期、调用数与计时边界；前章待验收项保留，不因首轮最后一章材料生成而宣称全课程完成。本次符合既定PLAN，无额外依赖或范围偏离，例行准备无需额外Claude审阅。
+
+## 2026-11-17：Ch19 TODO1 正式补全与验证
+
+用户先要求讲解run_batch的执行流程，随后明确要求“完成TODO1”。Codex已将prepare_reuse_buffers实现为调用allocate_buffers并返回true，三块device数组在循环前分配，32轮完成后由既有run_batch释放；删除占位语句，防御检查提示改为通用准备失败/缺少缓冲信息，不再指向已完成TODO。kernel、输入、传输、等待、计时和调用计数方式保持一致。更新讲义当前状态及正式验证、NOTE学习入口和实际问答、PLAN目录说明，不改动历史预检事实。
+
+现场复核GTX1650/CC7.5/4GB、驱动610.88、NVCC12.9.86、Runtime12090、DriverAPI13030、Compute Sanitizer2025.2.1，CUDA_LAUNCH_BLOCKING unset。bash -n与正式构建通过，-Wall/-Wextra无警告；check both两条路径各32000项mismatches0、最大误差0，per_step整批/循环内malloc/free均96/96，reuse整批3/3、循环内0/0。memcheck padding32、leak-check full零错误、泄漏0字节，退出0。
+
+正式bench both先校验、各预热3批、交替策略顺序测21批，CPU校验在计时外。中位数μs/批：per_step的host_loop/host_lifecycle/Event区间合计为24551.086/24551.166/601.440，reuse为4650.845/5404.955/373.856。CPU计时包含传输、初始化、Event操作和等待，lifecycle额外包含复用准备/清理；不把差值当纯分配成本或kernel指令加速。完整命令、输出、退出码及正式源码/脚本/二进制哈希见 [正式验证日志](../reports/CH19/completed-2026-11-17.txt)。本次未重采NSYS/NCU，已有11月11日NSYS仍属于隔离临时补全版历史证据；没有创建临时实现或清理历史产物。
+
+实现、重建、工具执行和文档更新均由Codex完成，用户个人运行与独立解释待验收；Ch19保持RUNNING、掌握度未上调，实际学习与agent工程耗时未记录。按既定PLAN阶段D推进，无范围偏离、新依赖或额外Claude审阅需要，未提交或推送Git。
+
+## 2026-11-17：Ch19 NSYS采集与三个计时的边界分析
+
+用户要求实际用NSYS采集，解释host_loop_us、host_lifecycle_us、event_sum_us的区别及现象原理。正式CH19源码与二进制保持不变；生成并保留同计算的诊断副本reports/CH19/experiment-2026-11-17-probe.cu，扩大cudaProfilerApi采集范围至完整生命周期，紧邻life0/t0/t1/life1添加CPU NVTX标记，保存每轮Event API读数并在批次结束后打印。未改变输入、kernel、传输、等待或分配生命周期，不引入新allocator。采集前正式check both通过；诊断副本编译无警告，check及目标采集全量数值/调用数通过。现场GTX1650/CC7.5/4GB、NVCC12.9.86、Runtime12090、DriverAPI13030、驱动610.88、NSYS2026.4.1，CUDA_LAUNCH_BLOCKING unset。
+
+先独立普通bench，各预热3批、21批中位数μs：per_step的loop/lifecycle/Event合计为25687.094/25687.174/700.928，reuse为6306.048/6831.647/197.888。随后分别用--trace=cuda,nvtx、--cuda-event-trace=true、--capture-range=cudaProfilerApi采诊断副本预热后的一个目标批次。采集内程序loop/lifecycle/Event为27939.568/27949.616/949.920μs与10978.555/12237.293/325.760μs，属于profiler条件，不当普通性能基线。
+
+每份目标报告均为32个kernel、64次H2D、32次D2H、32次memset；CPU全生命周期malloc/free分别96/96与3/3，复用循环内0/0。per_step循环内malloc/free API持续时间合计17389.396μs；reuse完整生命周期这两类API合计1229.891μs，CPU API持续时间含调用与可能等待，不推断内部实际物理分配次数或纯分配算法成本。NVTX复用准备/清理跨度923.880/330.509μs，靠近CPU时钟取点但不要求逐位相等。
+
+GPU逐轮Event标记与同stream kernel通过Correlation ID配对，所有前后间隙非负，全部64个窗口内无memcpy/memset。第二轮per_step的前空档/kernel/后空档为3.200/2.432/7.936μs，设备窗口13.568μs，程序同轮Event14.080μs；reuse为3.072/1.599/4.064μs，设备窗口8.735μs，程序Event9.280μs。32个kernel执行区间合计76.508/52.921μs，设备Event窗口合计1084.985/407.279μs，表明短kernel前后确有较多非kernel区间；不能把Event直接当单线程耗时或kernel色块之和。
+
+本次设备Event标记跨度与程序Event API存在不一致：累计差135.065/81.519μs，单轮最大绝对差45.435/97.075μs，根因未确定；保留两种读数，不用平移或强制校准掩盖，不用跨CPU/GPU绝对端点推断精确等待时长。仅据此不能确定每段空隙属于哪个CPU调用、WSL调度或频率/cache/TLB影响；未量化后几项，也不把kernel时长差宣称为复用让加法指令加速。Event Trace有额外开销，普通bench与采集结果分列。
+
+采集原始报告experiment-{per_step,reuse}-2026-11-17.nsys-rep及SQLite保存在reports/CH19；[完整日志](../reports/CH19/experiment-2026-11-17.txt)、[运行脚本](../reports/CH19/experiment-2026-11-17-run.py)、[分析脚本](../reports/CH19/experiment-2026-11-17-analysis.py)、[汇总JSON](../reports/CH19/experiment-2026-11-17-summary.json)、[逐轮CSV](../reports/CH19/experiment-2026-11-17-intervals.csv)及PNG/SVG保留。图从SQLite实测端点由Matplotlib重绘，非GUI截图，上排CPU/下排GPU分别使用自己的时间原点；GUI阅读路线与证据限制写入讲义，用户实际问题和概念写入NOTE，PLAN记录本次授权。没有操作GUI、重采NCU或运行新的Sanitizer；计算与内存访问逻辑没有改变，不重复既有正式memcheck。诊断副本仍用于复现，保留而不清理；没有创建无用临时方案产物，没有删除用户文件或历史证据。
+
+本次为用户要求的实验诊断，Codex完成采集和解释，不作为个人掌握证据；Ch19保持RUNNING，实际学习与工程执行耗时未记录。未扩展首轮必修、未启动Claude或其他agent，例行实验无需额外Claude审阅，未提交或推送Git。
+
+## 2026-11-18：Ch19间隙差异的受控对照
+
+用户指出前面只解释了Event边界，未解释两方案间隔为什么不同。Codex补做独立诊断，复用正式kernel/helper，保持正式源码与二进制不变。首轮pilot在per_step也保留了不用的固定数组，未完整复现原分配状态；保留pilot源码/日志作审计，v2明确区分per_step与per_step_keepalive。最终六条件为复用、每轮分配、每轮分配但另保留不用空间、固定工作地址而每轮分配额外不用空间、500μs CPU空转间隔、32组预分配地址轮换。每种各预热3批、轮换条件顺序测21批，每批32轮。诊断逐轮生成并校验CPU数据，CPU时间不混同正式程序的host_loop。
+
+普通direct对照Event中位数μs/批：reuse417.152、per_step635.872、per_step_keepalive337.600、scratch367.520、idle471.552、rotate356.064。CPU批次中位数依次4938.915/24758.418/5285.573/5175.454/21601.369/4681.715μs。除rotate每批用32个a地址外，其余各条件每批a虚拟地址数均为1；这反证“每轮必然换地址取数”，不证明物理映射/cache相同。原正式bench在诊断前后两次Event为411.200/398.048与558.976/294.560μs，说明两方案差距不固定；正式host_lifecycle仍分别为24555.217/5220.801与23132.056/4689.411μs。
+
+Graph控制将start Event→同kernel→stop Event连成一次提交，更新kernel参数在Event外；六条件Event中位数分别269.984/386.496/333.216/255.520/357.760/312.608μs。普通直接/Graph全量逐轮校验通过；另对Graph每轮分配案例运行memcheck padding32/leak-check full，零错误、零泄漏。Graph数据只支持提交结构会影响窗口，不据此排除调度因素或声称纯kernel耗时。
+
+另以NSYS2026.4.1采direct的per_step/per_step_keepalive/reuse各一个预热后批次，CUDA Event Trace开启，保留NSYS SQLite与原始报告。前两者循环内malloc/free都96/96，但API持续时间合计17669.642/367.908μs；cudaLaunchKernel CPU中位数18.861/9.453μs，cudaEventRecord为12.1985/9.8435μs。第三个复用条件无循环内分配释放。证据支持分配驻留状态会改变Runtime/Driver后续提交路径的耗时，不能解释为malloc/free直接计入Event；NSYS没有给出内部慢路径名称，仍不能唯一归因到重映射、回收、频率、cache或OS调度。所有采集内API返回成功，每份32个kernel。诊断时GPU仍GTX1650/CC7.5、驱动610.88、NVCC12.9.86，采集前GPU处于P8/300MHz仅是瞬时快照，不当作每个kernel的运行频率证据。
+
+报告统一保留reports/CH19/cause-2026-11-18*及cause-{per_step,per_step_keepalive,reuse}-2026-11-18.nsys-rep/SQLite；[v2完整日志](../reports/CH19/cause-2026-11-18-v2.txt)、[NSYS日志](../reports/CH19/cause-2026-11-18-trace.txt)、[结构化汇总](../reports/CH19/cause-2026-11-18-summary.json)、[分析脚本](../reports/CH19/cause-2026-11-18-analysis.py)、[memcheck与源码核验](../reports/CH19/cause-2026-11-18-verification.txt)可复查。诊断源码、二进制和pilot仍用于复盘，不视作无用临时文件；未删除用户或历史文件。NOTE与讲义补充真实问题、对照结论及未确定边界。Ch19继续RUNNING，Codex诊断不作为用户掌握证据，实际学习/工程用时未记录；未引入新课程必修、提交或推送Git。
+
+## 2026-11-18：Ch19本章总结与理解证据更新
+
+按用户“总结本章内容”的要求，仅更新NOTE与RECORD。NOTE新增页末“今日完成任务、基本概念、踩坑记录、八股自测”本章总结，页首阅读入口同步；覆盖分配生命周期、唯一TODO实现、run_batch逐轮host片段/计数差值、main的策略与lambda/校验/预热/trace/bench流程、三个时间边界、全kernel完成与线程barrier的区别、NSYS设备标记/kernel间隔、地址与常驻分配对照，以及未知内部原因。实际提问使用红色标签，核心概念使用mark；引用11月17日正式普通测量与既有诊断，保持不同日期/口径分离，不重复新增工程证据。
+
+用户已主动准确归纳：“复用分配空间可以节约每次反复申请和释放的时间开销，而event时间差异不是必然有巨大差别。”记录为两项核心结论的复述证据，进度表不再只写“个人解释全无”，但没有个人运行、采集或完整独立解释的验收证据；Ch19保持RUNNING、掌握度未完整评估，不由Codex实现与工具通过推定个人掌握，也不据最后一章总结宣布首轮全课程DONE。既有代码与工具执行归Codex辅助，实际学习与总结耗时均未记录。
+
+只读复核当前CH19源码、compile.sh及正式二进制SHA-256，均与completed-2026-11-17.txt一致；该日志双路径各32000项正确、最大误差0、memcheck零错误/零泄漏，正式计时及11月18日cause汇总可重读。本次仅核对已保存日志、数据和文档链接/格式，没有重编译、运行GPU、重采NSYS/NCU或重复Sanitizer，也没有修改源码、脚本、PLAN、章节实验或环境配置；没有创建临时实现或删除历史文件，无计划偏离或额外Claude审阅需要，未提交或推送Git。

@@ -161,7 +161,7 @@ CH15/                                       # Event 接力两处等待已按要�
 CH16/                                       # capture/实例化与 replay 已按要求补全，个人运行与解释待验收
 CH17/                                       # PTX/cubin 两处编译命令已按要求补全，个人运行与解释待验收
 CH18/                                       # Driver 加载/启动两处练习已按要求补全，个人运行与解释待验收
-CH19/                                       # 按需创建
+CH19/                                       # 循环外分配练习已按要求补全并验证，个人运行与解释待验收
 common/                                      # 逐步提取的检查、计时 helper
 scripts/                                     # 按需新增 env/profile/export 脚本
 DOCS/chapters/XX_topic.md                     # 一章一份简短任务和实验记录
@@ -221,3 +221,5 @@ Reference 查参数、错误与同步语义，Programming Guide 查执行机制�
 | 2026-11-09 | 准备 Ch17 同源 vector add 的 PTX/cubin 编译练习、产物观察讲义与预检 | 用户明确要求“生成CH17内容”；只改变编译输出阶段，保留两处命令 TODO，Runtime 校验骨架完整提供；固定 sm_75 及 vector_add 参数合同供 Ch18 复用，不扩展 JIT 缓存、SASS 优化或 Driver 实现，不补记前章验收 |
 | 2026-11-09 | 准备 Ch18 Driver 加载 Ch17 cubin 并启动 vector add 的骨架、讲义与预检 | 用户明确要求“生成CH18内容”；使用既定 primary context，保留模块加载/入口查找及参数组织/launch 两处 TODO；固定输入与 kernel，只比较 host 启动路径，不扩展 PTX JIT、性能分析、Hook 或 API Inventory，不补记前章验收 |
 | 2026-11-10 | Ch18增加context查询与打印探针 | 用户要求观察previous/context及CPU线程的关系；仅打印变量地址、句柄和公开API查询结果，不读取不透明内部结构，不增加新context或多线程实验，保持原数值验收与课程范围 |
+| 2026-11-11 | 准备 Ch19 循环内分配与循环外复用的独立骨架、讲义及教学预检 | 用户明确要求“生成CH19内容”；只改变三块工作缓冲的生命周期，保留一处循环外分配TODO，比较全量结果、循环内调用数及CPU计时；Event和NSYS各守边界，不实现完整allocator、async pool或启动后续选修，不补记前章验收 |
+| 2026-11-17 | Ch19补充NSYS完整生命周期与设备Event区间对照 | 用户要求实际采集解释三个计时和原理；正式源码保持不变，单独诊断副本增加CPU边界标记并扩大采集范围，保留原始报告和分析图；不扩大allocator范围或将采集结果当个人学习验收 |
