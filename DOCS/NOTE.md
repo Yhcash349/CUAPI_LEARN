@@ -114,6 +114,18 @@ CPU线程在这里就是运行main、调用这些cu API的host执行线程。驱
 
 用户随后已正确复述“复用可以节省反复申请释放的开销，Event时间不必有巨大差别”。本页末尾的 [Ch19总结](#2026-11-18-ch19内存复用分配生命周期与计时边界) 汇总本章实际问题、核心概念、实测边界与自测；这是一项核心理解证据，个人运行和完整独立解释仍待验收。
 
+## Ch20 阅读入口（2026-11-18，首轮后选修）
+
+[异步分配与内存池讲义](chapters/20_async_pool.md)承接Ch19。仍做32轮、每轮1000项vector_add，两条路径都每轮申请并释放三个数组，比较普通cudaMalloc/cudaFree与同stream的cudaMallocAsync/cudaFreeAsync。[CH20/async_pool.cu](../CH20/async_pool.cu)的申请和释放两处练习已于2026-11-18按用户要求由Codex补全。沿main→run_batch→enqueue_work阅读，再看两个分配/释放helper，个人运行和独立解释待验收。
+
+先把异步分配理解为“申请、访问、释放也按队列顺序安排”。同stream内先申请，再H2D→memset→kernel→D2H，最后释放，run_batch每轮等待完成；地址写回host变量不等于GPU操作已经完成，freeAsync返回后不能再提交使用旧地址的新工作。两条路径每批API仍各申请96次、释放96次，不能照搬Ch19循环外持有空间时的3/3或循环内0/0。
+
+沿`a`看参数的读写方向。`cudaMallocAsync(&b.a, kBytes, stream)`把显存地址写进CPU上的`b.a`，`cudaFreeAsync(b.a, stream)`则读取当时保存在`b.a`里的地址并提交释放。随后将`b.a`清空只改变CPU变量。用户也问到`cudaDeviceGetAttribute(&supported, cudaDevAttrMemoryPoolsSupported, 0)`。`CUDA_CHECK`检查查询调用是否成功，`supported`是写回的能力值，`1`表示支持，`0`表示不支持。配置pool时，`GetAttribute`向`old_threshold`写入旧值，`SetAttribute`从`threshold`读取新值，退出前再用保存的旧值恢复设置。
+
+pool是CUDA管理的空间储备。used表示应用正在使用的分配，reserved表示池保留的底层储备，释放后可能used为0而reserved非0；它不表示旧地址仍可访问。固定release threshold允许同步后保留空闲储备，但它不是容量上限或预分配量，也不保证任何环境都出现同样的保留值。先看本次实际输出；本机教学预检中8MiB低于观察到的32MiB储备，因此正式材料固定64MiB，成功批次释放同步后实际used=0、reserved=32MiB，trim后均为0；不把该32MiB推广成跨设备常数。host批次时间包括32轮分配、拷贝、kernel提交、释放和完成等待，不等于kernel时间或底层纯分配耗时。准确语义已核对[CUDA12.9.1内存池文档](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-runtime-api/group__CUDART__MEMORY__POOLS.html)，计数和验证证据由RECORD维护，不用预检结果认定个人掌握。
+
+本页末尾的 Ch20 总结集中整理了本章追问，包括每轮仍同步为什么更快、普通API能否使用池、如何看4个池统计观测点、32MiB是在哪一层出现的，以及本机两次正式bench与NSYS证据各回答什么问题。
+
 ## 首轮贯穿的观察问题
 
 | 观察问题 | 将使用的程序证据 |
@@ -2038,3 +2050,44 @@ Event不测某个线程，也不把1024个线程的耗时相加。stop排在该�
 沿源码说明为什么malloc/free从整批各96次变成各3次，而循环内是0次；为什么32次kernel和新输入上传仍然保留，以及哪一步保证下一轮可安全覆盖旧空间。
 
 再用自己的话画出life0→t0→循环→t1→life1，并指出start Event、kernel和stop Event的位置：三个时间为什么不能相加？如果复用后Event几乎不变、但CPU整批明显缩短，为什么仍能说明复用有价值？个人运行和完整解释达到PLAN验收后，再更新章节状态。
+
+## 2026-11-19 Ch20：单 stream 异步分配与内存池
+
+### 今日完成任务
+
+汇总11月18日至19日的Ch20学习与实验。[源码](../CH20/async_pool.cu)固定32轮，每轮1000个float32元素，grid=8、block=128，`a/b/c`各4000字节。两条路线使用相同的H2D、输出初始化、vector add和D2H，只对照普通分配释放与同stream异步分配释放。两处TODO由Codex按用户要求补全，正式验证、复测与驱动探针也由Codex执行。
+
+用户逐行询问内存池能力查询、池配置、验证/计时/清理和`print_pool()`，其中能力查询与池配置的行号后来随两处TODO补全调整。后续追问集中在池从哪来、普通API能否使用池、两条路径都等待为什么仍有差距、CH20相比CH19有什么优势，以及4000B为什么对应32MiB储备。
+
+### 基本概念
+
+**先看一轮如何执行。** `run_batch`按`step×1000`选择host片段，`enqueue_work`在同一stream提交H2D(a/b) → memset(c) → vector_add → D2H(c)。普通路径在第109行等这些工作完成后，第110行才调用三次`cudaFree`。异步路径在第107行已经把三次`cudaFreeAsync`排在D2H后，第109行一起等回读和释放完成。两条路径都逐轮等待，下一轮都重新申请三个数组，所以整批都是申请96次、释放96次。<mark>异步让CPU能提前提交释放。stream仍按顺序执行，当前程序仍等完这一轮才进入下一轮。</mark> [循环源码](../CH20/async_pool.cu#L97)
+
+**池来自哪里，API如何选池。** 第171行的`CUDA_CHECK`检查查询调用是否成功，`supported`接收设备能力值。第189行取得GPU 0当前池的句柄，程序使用CUDA提供的默认池。`cudaMallocAsync(&b.a, kBytes, stream)`根据stream所属设备选池，并把地址写回host上的`b.a`。`cudaFreeAsync(b.a, stream)`读取该地址，向stream提交释放，随后将host变量清空。普通`cudaMalloc`走传统分配接口。CUDA支持两种API混用，释放前仍需保证相关访问完成。例如把`cudaMallocAsync`的地址传给普通`cudaFree`时，调用方需要先确认GPU已经用完。 [CUDA内存池文档](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-runtime-api/group__CUDART__MEMORY__POOLS.html) · [NVIDIA混用说明](https://developer.nvidia.com/blog/using-cuda-stream-ordered-memory-allocator-part-2/)
+
+**日志里的两次归还。** `used`是池当前分给应用使用的字节数，`reserved`是池当前持有的底层显存量。`cudaFreeAsync`执行完成后，数组交回池，`used`下降。释放后同步时，池持有量超过release threshold，CUDA会尝试把可归还的空闲显存交给系统。尾部的`cudaMemPoolTrimTo(pool, 0)`显式请求归还空闲储备，第254行再恢复之前保存的阈值。正式`bench both`的四个观测点如下。
+
+| 源码打印位置 | 对应阶段 | `used` | `reserved` |
+| --- | --- | ---: | ---: |
+| 第197行 `before` | 取池并设置64MiB阈值后，异步申请前 | 0 B | 0 B |
+| 第223行 `after_async_check` | 首批32轮异步校验后 | 0 B | 32 MiB |
+| 第251行 `after_selected_work` | 预热和计时结束并确认完成后 | 0 B | 32 MiB |
+| 第253行 `after_trim` | 显式trim后 | 0 B | 0 B |
+
+正式版在整批边界读数。另一个探针只申请一个4000B数组，在释放前实测`used=4000、reserved=32MiB`。每轮三个数组请求量合计12000B，和池从系统取得的底层储备是两个数量。8MiB阈值与64MiB阈值下首次请求4000B，都观测到32MiB储备。释放并同步后，前者实测reserved归零，后者留下32MiB。<mark>阈值和reserved比较，影响的是空闲储备何时尝试归还。它既不决定首次取得多少显存，也不限制池能取得多少。</mark> [正式池日志](../reports/CH20/completed-2026-11-18.txt) · [阈值和申请大小对照](../reports/CH20/pool-size-check-2026-11-19-160346.txt)
+
+**本机32MiB出现在哪里。** `cudaMallocAsync`和直接Driver API都测到相同的储备，显式新建的池也一样。同机直接VMM的最小、推荐分配粒度均为2MiB，实际2MiB分配成功。追到WSL用户态驱动后，4000B池申请时有一条8192页的映射请求，33MiB池申请时有两条同样大小的请求，分别对应池统计的32MiB和64MiB。NVIDIA桥接库在调用`libdxcore`前已把字节数转为4KiB页数，`libdxcore`把结构体传入`/dev/dxg`。因此32MiB在进内核前已出现在请求里。当前证据定位到这条用户态驱动的池扩充路径，内部究竟是常量还是由设备或运行配置算出仍未确定。32MiB不能推广成所有设备的固定粒度，这段驱动追踪只用于回答追问。 [Driver对照](../reports/CH20/pool-driver-check-2026-11-19-160908.txt) · [WSL调用栈](../reports/CH20/pool-dxg-stack-2026-11-19-161320.txt)
+
+**为什么变快，和CH19有什么区别。** CH19把三个固定数组留在循环外，由程序一直持有，整批申请、释放各3次，循环内各0次。CH20允许各轮或各函数继续自行申请释放，底层空闲显存由CUDA池保留，下次请求合适大小时有机会复用。对于本实验这样固定形状、同一处控制整个循环的代码，CH19更直接。池的优势在于可以保留按需申请的接口，而CUDA负责管理底层空闲储备。两者的kernel都读写global memory，池复用发生在取得地址的阶段。
+
+`check`只跑初始校验。`bench`在正确性检查后每策略预热3批，交替顺序测21批并取中位数。`trace`只选一条策略，独立采集预热后的一批。`host_batch_us`用CPU时钟测从首轮申请前到末轮同步和释放完成，包含提交、拷贝、计算、释放及等待。池设置、CPU数值校验与最终trim在外。11月18日普通bench为**24.220 ms / 3.770 ms**，11月19日同一正式构建重跑为**25.689 ms / 4.162 ms**（普通/异步，32轮每批）。CH19循环外复用没有进入CH20同一套计时对照。 [首次正式计时](../reports/CH20/completed-2026-11-18.txt) · [11月19日复测](../reports/CH20/bench-2026-11-19-152127.txt)
+
+独立NSYS的一批两策略均有32个kernel、64次H2D、32次D2H和32次memset。CPU申请/释放API合计为**15.42 / 0.35 ms**，GPU实际拷贝、初始化和计算合计为**0.410 / 0.314 ms**，GPU上一轮回读结束到下一轮上传开始的31段间隔合计为**18.83 / 1.79 ms**。从CPU同步返回到下一轮第一次上传调用开始，普通路线要先做三次free再做三次malloc，异步路线只剩下一轮的三次mallocAsync，这段中位数为**446.84 / 5.75 μs**。这些读数显示主要差距在申请/释放调用与轮间衔接。CPU API与GPU空档会覆盖部分相同的时间。现有对照无法把整批收益精确分给提前提交、复用储备或驱动内部各环节。 [普通NSYS SQLite](../reports/CH20/completed-sync-2026-11-18.sqlite) · [异步NSYS SQLite](../reports/CH20/completed-async-2026-11-18.sqlite)
+
+### 踩坑记录
+
+用户曾把“CPU可以先提交释放”理解为“接着直接提交下一轮”。本章第109行仍逐轮等完，实际区别是释放命令排在等待的前面还是CPU等完才调用释放。用户后来指出两条路径都必须释放三个数组并等完成，kernel也仍读写global memory，讨论据此把收益定位到分配管理和提交衔接。另一个易混点是用12000B去和8MiB比。阈值比较的是池实际持有的32MiB，释放后`used=0`和`reserved=32MiB`可以同时成立。8MiB历史预检中储备在同步后回到0，那次异步整批约67.18ms，说明这一实验里保留策略会显著影响结果，不能只看API名称判断速度。 [8MiB历史预检](../reports/CH20/pilot-8MiB-2026-11-18.txt)
+
+### 八股自测
+
+从第0轮回读开始，分别说出CPU何时调用释放、GPU何时才执行释放、第1轮何时可以申请并上传。根据日志解释4000B、32MiB和64MiB分别从哪里来，再说出为什么used可以为0、reserved仍有32MiB，以及trim之后为何变为0。最后对比CH19的3/3、循环内0/0和CH20的96/96，说明两者各留住什么，并用普通bench与NSYS分别指出整批差距和轮间空档的证据。个人运行和完整独立解释待验收，私有驱动规则不列入验收。

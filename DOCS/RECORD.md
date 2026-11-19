@@ -30,8 +30,9 @@
 | 17 编译产物 | RUNNING | 45～60min | — | 未评估 | Codex 骨架、两处命令补全、验证、PTX/SASS讲解与总结 | 正式构建/全量数值/memcheck及入口查看通过；用户已提供nvdisasm命令与完整输出，寄存器/地址/产物关系已讲解；个人编译/Runtime运行与完整独立解释待验收 |
 | 18 Driver | RUNNING | 45～60min | — | 未评估 | Codex 骨架、两处 TODO 补全、验证、context探针及逐段讲解总结 | 正式版全量数值/memcheck和context探针已有验证；指针参数、隐式context选择/恢复、资源归属与清理已讲解总结；个人运行与完整独立解释待验收 |
 | 19 内存复用 | RUNNING | 45～60min | — | 未完整评估 | Codex 骨架、TODO补全、验证、NSYS及受控对照、讲解总结 | 正式数值/计数/memcheck/普通计时通过；NSYS与诊断边界已记录；用户已正确复述“复用减少反复申请释放开销，Event差距不必巨大”；个人运行与完整独立解释待验收 |
+| 20 异步分配与内存池（选修） | RUNNING | 45～60min | — | 未完整评估 | Codex 骨架、两处TODO补全、验证、驱动探针及讲解总结 | 正式双策略数值、memcheck、普通计时与NSYS通过。用户已指出两条路径每轮都释放三个数组、都等释放完成，且kernel仍访问global memory。个人运行和完整独立解释待验收 |
 
-后续选修仅在用户启动且 PLAN 写明范围后添加，未启用的选修不影响首轮完成。
+后续选修仅在用户启动且 PLAN 写明范围后添加，未启用的选修不影响首轮完成。2026-11-18按“生成CH20内容”启用Allocator方向第一节，范围见PLAN第6节，首轮仍为Ch00～19。
 
 ## 工作量记录口径
 
@@ -858,3 +859,47 @@ Graph控制将start Event→同kernel→stop Event连成一次提交，更新ker
 用户已主动准确归纳：“复用分配空间可以节约每次反复申请和释放的时间开销，而event时间差异不是必然有巨大差别。”记录为两项核心结论的复述证据，进度表不再只写“个人解释全无”，但没有个人运行、采集或完整独立解释的验收证据；Ch19保持RUNNING、掌握度未完整评估，不由Codex实现与工具通过推定个人掌握，也不据最后一章总结宣布首轮全课程DONE。既有代码与工具执行归Codex辅助，实际学习与总结耗时均未记录。
 
 只读复核当前CH19源码、compile.sh及正式二进制SHA-256，均与completed-2026-11-17.txt一致；该日志双路径各32000项正确、最大误差0、memcheck零错误/零泄漏，正式计时及11月18日cause汇总可重读。本次仅核对已保存日志、数据和文档链接/格式，没有重编译、运行GPU、重采NSYS/NCU或重复Sanitizer，也没有修改源码、脚本、PLAN、章节实验或环境配置；没有创建临时实现或删除历史文件，无计划偏离或额外Claude审阅需要，未提交或推送Git。
+
+## 2026-11-18：Ch20单stream异步分配与内存池选修准备
+
+用户要求“生成CH20内容”。首轮PLAN止于Ch19，本次依最新指令选择紧接Ch19的Allocator方向第一节作为最小延伸，在PLAN第6节先写明依赖、45～60分钟预算、范围、产物和验收，补计划变更记录。未改变首轮编号、追加其他选修或补记前章完成。新增CH20/async_pool.cu、CH20/compile.sh及DOCS/chapters/20_async_pool.md，更新NOTE入口和ENVIRONMENT能力快照。复用既有vector_add，固定N1000/float32/grid8/block128/32轮，每轮三数组4000字节；唯一比较普通cudaMalloc/cudaFree与同stream的cudaMallocAsync/cudaFreeAsync，两者每轮都完成后进入下一轮。正式源码保留allocate_async和release_async两处TODO，完整提供输入、pinned内存、传输、哨兵、全量校验、API计数、host计时、pool配置及清理。
+
+现场核验GTX1650/CC7.5/4GB、驱动610.88、NVCC12.9.86、Runtime12090、DriverAPI13030、Compute Sanitizer2025.2.1、NSYS2026.4.1，CUDA_LAUNCH_BLOCKING unset，memory_pools_supported=1。bash -n、正式和临时补全版构建均通过且-Wall/-Wextra无诊断。正式check sync的32000项误差0、调用96/96，memcheck零错误/零泄漏；check both在TODO1处按预期NOT RUN、退出2。隔离临时补全版check both各32000项、最大误差0、申请/释放各96次，memcheck padding32、leak-check full、track-stream-ordered-races all均零错误、泄漏0字节，退出0。只补TODO1时另验证TODO2占位路径能等待后清理，预期退出2，memcheck无错误/泄漏；该未完成路径在Sanitizer下pool used读数仍为12096，trim后reserved=0，故该分支统计不作为正常pool释放状态或泄漏证据，根因未深挖。
+
+准备阶段先设8MiB release threshold，得到成功释放后used/reserved均0，普通host批次中位数sync/async为23116.116/67181.754μs。随后最小统计探针实际观察4000字节分配在有效期间used=4000、reserved=33554432，8MiB阈值同步后储备归零；据此正式骨架改为固定64MiB，原pilot日志/NSYS/SQLite以pilot-8MiB-前缀保留，探针源码和输出保存到[pool-stats-probe](../reports/CH20/pool-stats-probe-2026-11-18.txt)。阈值不是预分配大小/容量上限，32MiB只代表本机本次观察；未把这一准备问题扩成用户额外实验或低层allocator排障课。
+
+源码修订后重跑匹配的构建、数值、Sanitizer、普通计时和NSYS预检。固定64MiB配置下，成功async批次释放同步后used=0、reserved=33554432字节，trim后均0。普通bench先校验、各预热3批、交替顺序测21批，host整批中位数sync/async为24140.163/3837.102μs。host从首轮分配前到末轮释放和完成后，包含分配、H2D、memset、kernel提交、D2H、释放及等待，不包含pool设置、CPU校验或最终trim；没有Event计时，不将差值当kernel加速、纯分配成本或跨设备保证。8MiB pilot与64MiB正式预检分列，不混成一次性能统计。
+
+独立NSYS以cudaProfilerApi仅采预热后的一个目标批次和紧随的CPU校验/打印。SQLite结构化检查sync的普通malloc/free各96次，async的异步malloc/free各96次，无另一类分配调用；两份均32个vector_add、64次H2D、32次D2H、32次memset，传输均4000字节；GPU单stream逐轮顺序均为H2D/H2D/memset/kernel/D2H。每份33次stream synchronize包含批次前一次和32次逐轮等待。保留raw API名称及版本后缀，另生成normalized计数，不用API数反推物理分配次数。原始报告为reports/CH20/preflight-{sync,async}-2026-11-18.nsys-rep及同前缀SQLite；[preflight日志](../reports/CH20/preflight-2026-11-18.txt)、[运行复现脚本](../reports/CH20/preflight-2026-11-18-run.py)、[分析脚本](../reports/CH20/preflight-2026-11-18-analysis.py)、[结构化计数及哈希](../reports/CH20/trace-counts-2026-11-18.json)保留。两个TODO临时补全仅在TemporaryDirectory内生成，验证后清理；正式源码/二进制均仍为TODO骨架。未运行NCU或GUI，未提交或推送Git。
+
+用户本次完成部分为提出生成需求；实现骨架、讲义、配置修正与工具预检均由Codex辅助，不算用户完整答案或个人学习成果。Ch20保持RUNNING，仅表示工程骨架和预检已运行；个人补全、重编译、双策略运行及生命周期/pool/计时边界解释待验收，掌握度未评估。实际学习用时与工程准备/agent耗时均未记录。范围扩展已按本次CH20请求落实到PLAN，是既有Allocator方向的小节，没有新增依赖或大规模路线切换；本次无需额外Claude审阅，前章待验收继续保留。
+
+## 2026-11-18：Ch20正式补全两处TODO与验证
+
+按用户要求在[CH20/async_pool.cu](../CH20/async_pool.cu)补全异步分配与释放。`allocate_async`在传入stream为a/b/c各调用一次cudaMallocAsync，`release_async`在同一stream、D2H之后按c/b/a提交cudaFreeAsync，并清空对应host指针。每次成功提交后计数，CUDA_CHECK检查API返回状态。移除过时的练习占位和回退，`run_batch`每轮仍等待一次，普通free排在等待后，异步free排在等待前。将阈值注释改为“本机预检观察到32MiB储备”，避免把单次读数写成固定分配粒度。同步更新PLAN目录、NOTE与讲义，原骨架和临时版预检作为历史证据保留。
+
+现场GTX1650/4GB/CC7.5，驱动610.88，NVCC12.9.86、Runtime12090、DriverAPI13030、Compute Sanitizer2025.2.1、NSYS2026.4.1，memory_pools_supported=1，采集时CUDA_LAUNCH_BLOCKING unset。bash -n和正式构建通过且无警告，`check both`各32000项无误差、申请/释放各96次。memcheck含padding32、leak-check full、track-stream-ordered-races all，零错误、零字节泄漏。异步释放并同步后观察到used=0、reserved=33554432字节，trim后均归零。普通bench各预热3批、交替顺序测21批，32轮host整批中位数sync/async为24220.318/3770.247μs，包含传输、提交、释放与等待，适用于本机本次设置。
+
+独立NSYS采正式版每策略一个预热后的批次。SQLite核对普通/异步API各96次申请与释放、各33次显式stream同步（批前1次加逐轮32次）。两份均有32个vector_add、64次H2D、32次D2H、32次memset、每次传输4000字节，GPU单stream逐轮顺序相同。原始报告与SQLite为`reports/CH20/completed-{sync,async}-2026-11-18.*`，命令、版本、哈希、程序结果、API原始名称及顺序校验见[正式验证日志](../reports/CH20/completed-2026-11-18.txt)。未执行NCU或GUI。Ch20保留RUNNING，Codex完成实现与验证，用户个人运行和独立解释待验收，学习与工程实际耗时均未记录。本次按既有选修范围推进，无新增依赖或额外Claude审阅需要。
+
+## 2026-11-19：Ch20默认池32MiB储备来源核查
+
+用户问为什么请求4000B时`reserved`为32MiB，以及这个值在哪设置。核对源码：第55行给`cudaMallocAsync`传4000B，第193～194行只设64MiB归还阈值，32MiB出现在观测注释与日志。另用最小探针对默认池做单次分配，各组从新进程和空池开始。GTX1650/CC7.5、驱动610.88、NVCC12.9.86、Runtime12090、DriverAPI13030。请求4000B时，设0/8/64MiB三个阈值，申请前均`reserved=0`，首次`cudaMallocAsync`返回后均`used=4000、reserved=32MiB`。释放并同步后`used`均为0，`reserved`分别为0/0/32MiB。固定64MiB时，请求1B、12000B、1MiB和32MiB均观测到32MiB储备，请求33MiB观测到64MiB。结果表明储备随分配产生，阈值影响的是实验中释放后的保留。CUDA12.9.1文档只说明底层申请与用户分配可以采用不同粒度，当前证据不能确定实现内部为何选择32MiB，也不能推广成固定粒度。
+
+[核查日志](../reports/CH20/pool-size-check-2026-11-19-160346.txt)含临时源码、编译/运行命令、原始读数与退出码。编译和8次运行均通过，临时目录已清理。正式课程代码及个人验收状态未改动。此项是统计探针，不作性能对照。
+
+## 2026-11-19：Ch20沿WSL驱动链定位32MiB池扩充请求
+
+按用户追问继续核查。WSL2 6.18.33.2、GTX1650、驱动610.88、CUDA12.9.86。实际`cuGetProcAddress`和`dladdr`定位公开入口在`/usr/lib/wsl/lib/libcuda.so.1`，解析后的`cuMemAllocAsync`位于Windows驱动投影目录的`libcuda.so.1.1`。独立进程的Runtime默认池、直接Driver默认池、显式创建的Driver池分别申请4000B，均`used=4000/reserved=32MiB`。同机公开VMM粒度查询在设备本地、无导出句柄配置下返回最小与推荐均2MiB，直接`cuMemCreate(2MiB)`成功，默认池统计未增长。NSYS采集通过，公共API轨迹未提供池内部扩充算法。命令、源码和输出见[Driver探针](../reports/CH20/pool-driver-check-2026-11-19-160908.txt)。
+
+进程内只观察`/dev/dxg`映射请求的公开字段，所有参数原样转发。校正观察器格式警告后以`-Werror`重建，调用栈和三组运行通过。4000B池请求在`cuMemAllocAsync`返回前发出一条8192页的映射请求，另有一条512页映射，池统计增加32MiB。33MiB池请求发出两条8192页映射，另有一条512页映射，池统计增加64MiB。直接2MiB VMM映射对照为512页。调用栈为用户态`libcuda.so.1.1 → libnvdxgdmal.so.1 → libdxcore.so → ioctl(/dev/dxg)`；本机反汇编显示bridge将字节数右移12换成页数，libdxcore原样转发结构体指针。32MiB已体现在传入内核前的请求里，结果支持当前NVIDIA用户态的池扩充路径使用32MiB块，不支持将其归因于CH20阈值、默认池专属属性、普通VMM最小粒度或通用WSL接口强制取32MiB。未定位私有实现中该规格是常量还是由配置/设备属性推导。调用栈、公开UAPI头文件哈希、相关库哈希、反汇编和原始结果见[WSL映射探针](../reports/CH20/pool-dxg-stack-2026-11-19-161320.txt)，初版观测也保留；临时源码、下载头文件与二进制已清理。正式章节源码和个人验收状态保持原记录，此项不作性能对比。
+
+## 2026-11-19：Ch20本章总结、bench复测与理解证据
+
+按用户“总结本章内容”，在NOTE末尾新增章节总结并更新阅读入口。按真实追问整理同stream轮次顺序、默认池和混用边界、四个池统计观测点、阈值与两次归还、32MiB来源、CH19与CH20的分工，以及普通bench与NSYS证据。保留踩坑与自测，驱动私有规则只作为追问记录，不加入课程验收。正式源码和脚本未改动。
+
+补记此前按用户要求直接执行的11月19日`bench both`。GTX1650/CC7.5/4GB、驱动610.88、Runtime12090、DriverAPI13030，源码和二进制哈希与11月18日正式验证一致。每策略先校验、预热3批，交替顺序测21批，每批32轮。普通/异步host整批中位数为25689.384/4161.930μs，差21527.454μs（少83.799%）。双路径各32000项正确、最大误差0，申请/释放各96次。释放并同步后used=0/reserved=32MiB，trim后均为0。命令、环境和原始输出见[11月19日复测日志](../reports/CH20/bench-2026-11-19-152127.txt)，11月18日正式版24220.318/3770.247μs作为独立历史测量保留。
+
+本次只读复核11月18日两份正式NSYS SQLite。按对应malloc/free的Runtime行累计`end-start`得普通/异步15.422604/0.349550ms。把同stream每轮的H2D/H2D/memset/kernel/D2H五段GPU活动按时间排序，各批累计0.410031/0.314023ms。相邻轮D2H结束到下一轮H2D开始的31段累计18.833302/1.788738ms。仅在CPU轨上取前轮同步结束到后轮第一次memcpy API开始的31段，中位数446.841/5.751μs，普通段内为三次free和三次malloc，异步段内为三次mallocAsync。独立采集数值不拼成普通bench差值，CPU与GPU观察区间也不相加。池保留与释放提交顺序同时不同，现有对照不分摊二者的独立收益。
+
+用户曾把异步理解为提交释放后直接进入下一轮，讲解后已主动指出两条路径每轮都有三次释放、都等释放完成、计算仍访问global memory。记为具体理解证据。个人构建、运行与完整独立解释尚待验收，Ch20仍为RUNNING、掌握度未完整评估，实际学习和工程用时均未记录。总结时未重编译、运行GPU、重采NSYS或重复Sanitizer，复测与驱动诊断均按此前已保存的证据记录。本次无需额外Claude审阅。

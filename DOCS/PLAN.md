@@ -79,6 +79,12 @@ Ch15 先使用相互独立的数据块和双缓冲骨架；不能把同一步有
 
 ## 6. 后续选修：保留原工作主线
 
+### Ch20：单 stream 异步分配与内存池（2026-11-18 启动）
+
+用户要求“生成CH20内容”，按紧接Ch19的最小延伸安排为Allocator方向第一节选修；首轮仍为Ch00～19，不改变前章待验收状态，也不自动启动其他选修。依赖Ch14的stream顺序与Ch19的分配生命周期，预算45～60分钟。唯一实验变量是每轮三数组使用普通cudaMalloc/cudaFree，还是同一stream上的cudaMallocAsync/cudaFreeAsync；固定32轮、N=1000、float32、grid8/block128、输入、传输和逐轮完成边界。只引入按stream排序的分配生命周期与pool保留空间两个概念。
+
+产物为CH20独立源码/编译脚本及DOCS/chapters/20_async_pool.md，保留分配和释放两处TODO。先查cudaDevAttrMemoryPoolsSupported，不支持则明确NOT RUN；固定pool release threshold以允许同步后保留空闲空间，恢复配置和trim放在计时外。验收全量输出、每批Runtime分配释放调用数及同步后pool used/reserved；普通host整批完成时间与独立NSYS分别记录，不增加Event计时、跨stream复用、自定义pool、Graph分配节点、完整allocator或框架依赖。教学方临时补全预检不等于用户完成；pool统计与API调用数不能推断底层物理分配次数，性能无固定加速要求。
+
 选修不是自动排入的课程。由用户工作需求触发，先将当前要做的小节、依赖和验收加入本计划，每节仍最多 1 小时；下表是主题及拆分方向，不意味着一行可以一节讲完。不得重新引入“必须完成所有进阶主题才能学 Graph”的依赖。
 
 | 方向 | 启动前提 | 保留的实验与验收思想 |
@@ -162,6 +168,7 @@ CH16/                                       # capture/实例化与 replay 已按
 CH17/                                       # PTX/cubin 两处编译命令已按要求补全，个人运行与解释待验收
 CH18/                                       # Driver 加载/启动两处练习已按要求补全，个人运行与解释待验收
 CH19/                                       # 循环外分配练习已按要求补全并验证，个人运行与解释待验收
+CH20/                                       # 首轮后选修：单stream异步分配与pool，两处练习已按要求补全
 common/                                      # 逐步提取的检查、计时 helper
 scripts/                                     # 按需新增 env/profile/export 脚本
 DOCS/chapters/XX_topic.md                     # 一章一份简短任务和实验记录
@@ -223,3 +230,4 @@ Reference 查参数、错误与同步语义，Programming Guide 查执行机制�
 | 2026-11-10 | Ch18增加context查询与打印探针 | 用户要求观察previous/context及CPU线程的关系；仅打印变量地址、句柄和公开API查询结果，不读取不透明内部结构，不增加新context或多线程实验，保持原数值验收与课程范围 |
 | 2026-11-11 | 准备 Ch19 循环内分配与循环外复用的独立骨架、讲义及教学预检 | 用户明确要求“生成CH19内容”；只改变三块工作缓冲的生命周期，保留一处循环外分配TODO，比较全量结果、循环内调用数及CPU计时；Event和NSYS各守边界，不实现完整allocator、async pool或启动后续选修，不补记前章验收 |
 | 2026-11-17 | Ch19补充NSYS完整生命周期与设备Event区间对照 | 用户要求实际采集解释三个计时和原理；正式源码保持不变，单独诊断副本增加CPU边界标记并扩大采集范围，保留原始报告和分析图；不扩大allocator范围或将采集结果当个人学习验收 |
+| 2026-11-18 | 启动Ch20单stream异步分配与内存池选修 | 用户要求“生成CH20内容”；依Ch19的最小延伸选取Allocator方向第一节，固定两种每轮分配策略、保留两处TODO；首轮编号和前章验收不变，不自动安排其他选修 |

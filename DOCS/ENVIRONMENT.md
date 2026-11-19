@@ -38,3 +38,7 @@ GTX 1650 没有 Tensor Core，因此 Tensor Core 加速不列为本机实践目�
 当前默认 nsys-ui 路径为 /usr/local/cuda-12.9/bin/nsys-ui，实际GUI版本2025.1.3.140；命令行nsys为2026.4.1。新报告需以2026.4.1或更新GUI打开，本次未安装或升级GUI，未声称完成GUI交互验证。GUI版本查询打印WSL/OpenGL回退信息，但成功输出版本。
 
 CLI的 --cuda-event-trace 默认false；本次启用true成功采到两个设备Event完成标记。记录、报告与WSL下跨CPU/GPU时间对齐不一致的边界说明见 [Ch13 GUI路线](chapters/13_host_async.md#nsys-gui-阅读路线2026-11-02) 及 [日志](../reports/CH13/events-2026-11-02.txt)。只验证本例、当前驱动与采集方式，不将其推广为所有版本和功能都可用。
+
+## 2026-11-18 Ch20内存池支持核验
+
+现场GTX1650/4096MiB/CC7.5、驱动610.88、NVCC12.9.86、Runtime12090、DriverAPI13030、Compute Sanitizer2025.2.1、NSYS2026.4.1。程序查询cudaDevAttrMemoryPoolsSupported=1，单stream的cudaMallocAsync/cudaFreeAsync、pool属性查询/设置及trim实际运行成功；临时补全版全量数值、memcheck（含stream-ordered-races all和leak-check full）及NSYS采集通过。固定64MiB release threshold时，成功释放并同步后used=0、reserved=32MiB，trim后均为0；这是本机本次观察，不保证其他设备或配置相同。完整命令与退出码见[CH20预检日志](../reports/CH20/preflight-2026-11-18.txt)，范围及早期8MiB阈值问题见[Ch20讲义](chapters/20_async_pool.md)。本条只补充本节所需能力，不扩展到跨stream复用、自定义pool、IPC、VMM或Graph内存节点。
