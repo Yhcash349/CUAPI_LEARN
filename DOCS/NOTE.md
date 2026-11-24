@@ -126,6 +126,16 @@ pool是CUDA管理的空间储备。used表示应用正在使用的分配，reser
 
 本页末尾的 Ch20 总结集中整理了本章追问，包括每轮仍同步为什么更快、普通API能否使用池、如何看4个池统计观测点、32MiB是在哪一层出现的，以及本机两次正式bench与NSYS证据各回答什么问题。
 
+## Ch21 阅读入口（2026-11-19，首轮后选修）
+
+[跨stream异步分配生命周期讲义](chapters/21_cross_stream_lifetime.md)从一轮具体数据流开始：owner申请a/b/c并上传，worker计算并回读，owner最后释放。先把跨队列依赖理解为“另一条队列到达指定标记后，我的后续工作才能执行”。ready保证分配和输入已准备好，done保证最后一次回读已经完成，两条边分别保护开始使用与最终释放。
+
+阅读时先看`run_batch()`，再看两处等待。2026-11-24两处TODO已按用户要求由Codex完成。`wait_until_ready()`将等待`ready`排入`worker`，让后续初始化、计算和回读在分配与上传完成后执行。`wait_until_unused()`将等待`done`排入`owner`，让后续释放在回读完成后执行。每批32轮，`host`路线在交接处由CPU等64次，`event`路线向目标stream提交64次等待。两条路线各有96次申请和96次释放。批次末尾的同步负责等这批工作全部完成，分配与使用之间的顺序由中途两处交接保证。[CH21源码](../CH21/cross_stream_lifetime.cu) · [CUDA Stream Management](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-runtime-api/group__CUDART__STREAM.html) · [CUDA Stream Ordered Memory Allocator](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-runtime-api/group__CUDART__MEMORY__POOLS.html)
+
+本章各轮仍按顺序执行，因为owner等本轮回读完成并释放后，才执行下一轮申请与上传。正式实现与验证由Codex执行，用户个人运行和独立解释待验收。
+
+本页末尾的 [Ch21 总结](#2026-11-24-ch21跨-stream-异步分配的使用与释放) 收录本章的参数、两处交接和计时追问。
+
 ## 首轮贯穿的观察问题
 
 | 观察问题 | 将使用的程序证据 |
@@ -2091,3 +2101,37 @@ Event不测某个线程，也不把1024个线程的耗时相加。stop排在该�
 ### 八股自测
 
 从第0轮回读开始，分别说出CPU何时调用释放、GPU何时才执行释放、第1轮何时可以申请并上传。根据日志解释4000B、32MiB和64MiB分别从哪里来，再说出为什么used可以为0、reserved仍有32MiB，以及trim之后为何变为0。最后对比CH19的3/3、循环内0/0和CH20的96/96，说明两者各留住什么，并用普通bench与NSYS分别指出整批差距和轮间空档的证据。个人运行和完整独立解释待验收，私有驱动规则不列入验收。
+
+## 2026-11-24 Ch21：跨 stream 异步分配的使用与释放
+
+### 今日完成任务
+
+复盘 11 月 19 日生成骨架以来的 Ch21。两处 TODO 由 Codex 按用户要求补全，正式构建、全量校验、memcheck、普通计时、NSYS 和临时分段对照也由 Codex 执行。用户依次询问两种等待的含义、命令行模式、`CUDA_LAUNCH_BLOCKING`、stream 与 Event 的创建标志，以及交接 API 和端到端时间为何会得出不同的快慢顺序。个人运行与独立解释待验收。[CH21 讲义](chapters/21_cross_stream_lifetime.md) · [任务记录](RECORD.md)
+
+### 基本概念
+
+**从第 0 轮看同一组数组如何跨两条队列。** `owner` 申请 `a/b/c`，上传 `a/b`，再记录 `ready[0]`。`worker` 等 `ready[0]`，然后初始化 `c`、做向量加法、回读 `c`，最后记录 `done[0]`。`owner` 等 `done[0]` 后释放三个数组。<mark>`ready` 保护分配及上传完成后才能访问，`done` 保护最后一次访问完成后才能释放。</mark> 回读仍要读 `c`，所以 `done` 要放在 D2H 后面。下一轮的申请与上传排在 `owner` 本轮释放之后，GPU 各轮按顺序执行。[`run_batch()`](../CH21/cross_stream_lifetime.cu#L71)
+
+<span style="color:red">用户提问：“两种方式都保护同样的 64 处交接”，两种方式指什么？</span>
+
+`host` 在两个交接点调用 `cudaEventSynchronize`，由 CPU 等标记完成后才提交后续工作。`event` 通过 `cudaStreamWaitEvent(worker, ready, 0)` 和 `cudaStreamWaitEvent(owner, done, 0)` 把等待排入对应队列，CPU 可以继续提交。每轮两次交接，32 轮共 64 次。两条路线每轮各调用三次 `cudaMallocAsync` 和三次 `cudaFreeAsync`，整批申请与释放各 96 次。批末的 `cudaStreamSynchronize` 负责让 CPU 确认整批完成，中途的两条依赖负责约束内存被访问和释放的时机。[等待函数](../CH21/cross_stream_lifetime.cu#L44)
+
+**命令行和创建参数。** 用户问程序有哪些模式和选择。`check` 跑正确性和计数校验。`bench` 先校验，每种策略预热 3 批，再交替顺序测 21 批并取中位数。`trace` 校验并预热后标记一个批次供 NSYS 采集，须显式指定 `host` 或 `event`。第二个参数决定跑哪种等待策略，`both` 分别运行两种策略。无参数默认 `check both`。[参数解析](../CH21/cross_stream_lifetime.cu#L152)
+
+<span style="color:red">用户提问：`blocking` 是干什么的？`flags`、`cudaStreamNonBlocking` 和 `cudaEventDisableTiming` 分别是什么意思？</span>
+
+`blocking` 通过 `std::getenv` 读取环境变量 `CUDA_LAUNCH_BLOCKING`。设为 `1` 时，CUDA 会让 CPU 等 kernel 执行完成后才从启动调用继续，改变本章的提交节奏。程序只接受变量未设置或值为字符串 `"0"`。`cudaStreamCreateWithFlags` 的第一个参数用于写回新 stream 的句柄，第二个参数配置队列行为。`cudaStreamNonBlocking` 去掉新队列与 legacy 默认 stream 之间的隐式同步，显式 Event 等待仍生效。`cudaEventDisableTiming` 让 `ready/done` 保留完成标记的用途，省去计时数据。整批耗时由 CPU 时钟测量。[创建代码](../CH21/cross_stream_lifetime.cu#L185) · [CUDA Stream 文档](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-runtime-api/group__CUDART__STREAM.html) · [CUDA Event 文档](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-runtime-api/group__CUDART__EVENT.html)
+
+**两种路线做 `bench` 的目的。** 用户问实验数据如何体现本章内容、为什么 `event` 的 64 次交接更短而端到端反而更长，以及比较两种路线究竟要观察什么。固定输入、GPU工作与内存分配方式，只改变谁来等，观察 CPU 能否更早提交工作，以及整批是否也更早完成。两条路线各校验 32,000 项，最大误差 0，memcheck 开启异步分配顺序检查后报告零错误、零泄漏。NSYS 分别观察到 64 次 `cudaEventSynchronize` 和 64 次 `cudaStreamWaitEvent`，两份 GPU 轨迹的 64 次 H2D、32 次初始化、32 次 kernel、32 次 D2H 都逐轮有序。[正式验证日志](../reports/CH21/completed-2026-11-24.txt) · [NSYS 活动计数](../reports/CH21/completed-trace-counts-2026-11-24.json)
+
+### 踩坑记录
+
+<mark>CPU 调用返回、GPU 满足依赖、整批完成是三个时间点。</mark> 两份单批 NSYS 报告中，64 次交接的 CPU API 合计为 `host` 2.578 ms、`event` 0.087 ms。`host` 的区间包含 CPU 等标记的时间，`event` 的区间到等待提交返回为止。普通 `bench` 从第一轮申请前计到批末两条队列同步返回，首次正式测量的中位数为 3.808 / 4.339 ms。两组数据来自独立运行，不能用 NSYS 的 API 时间差直接推算普通 `bench` 的整批差。[计时诊断](chapters/21_cross_stream_lifetime.md#为什么交接-api-更短整批却可能更长)
+
+临时对照用同一个 CPU 时钟把循环段和批末同步拆开。`host / event` 的循环段中位数为 3.773 / 1.887 ms，批末同步为 0.002 / 2.457 ms，整批为 3.775 / 4.306 ms。`event` 路线提交结束得更早，此时队列里还有任务，CPU 于是把较多等待留到了批末。正式版另外复测 10 组，`host` 快 6 组，`event` 快 4 组。数据支持等待位置发生变化，未定位 CUDA 驱动内部各环节对原始整批差值的贡献。[分段对照日志](../reports/CH21/handoff-pair-2026-11-24.txt) · [四策略对照日志](../reports/CH21/handoff-diagnosis-2026-11-24.txt)
+
+### 八股自测
+
+沿第 0 轮说出 `ready` 和 `done` 各由谁记录、由谁等待。把 `done` 移到 kernel 后、D2H 前，释放会失去对哪次访问的保护？把两次交接从 CPU 等待换成队列等待后，为什么 GPU 仍逐轮执行？
+
+自己运行 `check both` 和 `bench both`，从输出解释 96/96 和 64 怎么来。再指出 NSYS 中 `cudaStreamWaitEvent` 的 CPU 区间和普通 `bench` 的起止，并用分段数据解释为什么循环更短而整批可以更长。

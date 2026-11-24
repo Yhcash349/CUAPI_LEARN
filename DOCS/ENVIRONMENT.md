@@ -42,3 +42,7 @@ CLI的 --cuda-event-trace 默认false；本次启用true成功采到两个设备
 ## 2026-11-18 Ch20内存池支持核验
 
 现场GTX1650/4096MiB/CC7.5、驱动610.88、NVCC12.9.86、Runtime12090、DriverAPI13030、Compute Sanitizer2025.2.1、NSYS2026.4.1。程序查询cudaDevAttrMemoryPoolsSupported=1，单stream的cudaMallocAsync/cudaFreeAsync、pool属性查询/设置及trim实际运行成功；临时补全版全量数值、memcheck（含stream-ordered-races all和leak-check full）及NSYS采集通过。固定64MiB release threshold时，成功释放并同步后used=0、reserved=32MiB，trim后均为0；这是本机本次观察，不保证其他设备或配置相同。完整命令与退出码见[CH20预检日志](../reports/CH20/preflight-2026-11-18.txt)，范围及早期8MiB阈值问题见[Ch20讲义](chapters/20_async_pool.md)。本条只补充本节所需能力，不扩展到跨stream复用、自定义pool、IPC、VMM或Graph内存节点。
+
+## 2026-11-19 Ch21跨stream异步分配生命周期核验
+
+现场复核GTX1650/4096MiB/CC7.5、驱动610.88、NVCC12.9.86、Runtime12090、DriverAPI13030、Compute Sanitizer2025.2.1、NSYS2026.4.1、memory_pools_supported=1。隔离补全副本验证了owner队列分配/上传→worker队列访问/回读→owner队列释放的两处Event依赖；全量数值、memcheck（stream-ordered-races all及leak-check full）和独立NSYS计数/工作顺序均通过。两策略固定64MiB阈值，最终释放同步后used=0/reserved=32MiB，trim后均为0。证据见[CH21预检日志](../reports/CH21/preflight-2026-11-19.txt)与[讲义](chapters/21_cross_stream_lifetime.md)。正式源码仍保留两处TODO；这里只核验本例跨队列生命周期，不声明自定义pool、多GPU、VMM或任意框架路径可用。

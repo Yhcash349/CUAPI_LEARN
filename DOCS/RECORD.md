@@ -31,8 +31,9 @@
 | 18 Driver | RUNNING | 45～60min | — | 未评估 | Codex 骨架、两处 TODO 补全、验证、context探针及逐段讲解总结 | 正式版全量数值/memcheck和context探针已有验证；指针参数、隐式context选择/恢复、资源归属与清理已讲解总结；个人运行与完整独立解释待验收 |
 | 19 内存复用 | RUNNING | 45～60min | — | 未完整评估 | Codex 骨架、TODO补全、验证、NSYS及受控对照、讲解总结 | 正式数值/计数/memcheck/普通计时通过；NSYS与诊断边界已记录；用户已正确复述“复用减少反复申请释放开销，Event差距不必巨大”；个人运行与完整独立解释待验收 |
 | 20 异步分配与内存池（选修） | RUNNING | 45～60min | — | 未完整评估 | Codex 骨架、两处TODO补全、验证、驱动探针及讲解总结 | 正式双策略数值、memcheck、普通计时与NSYS通过。用户已指出两条路径每轮都释放三个数组、都等释放完成，且kernel仍访问global memory。个人运行和完整独立解释待验收 |
+| 21 跨stream异步分配生命周期（选修） | RUNNING | 45～60min | — | 未评估 | Codex 骨架、讲义、两处TODO补全及验证 | 正式版双策略各32000项通过，memcheck零错误及零泄漏，NSYS核对交接API和GPU活动顺序。个人运行与独立解释待验收 |
 
-后续选修仅在用户启动且 PLAN 写明范围后添加，未启用的选修不影响首轮完成。2026-11-18按“生成CH20内容”启用Allocator方向第一节，范围见PLAN第6节，首轮仍为Ch00～19。
+后续选修仅在用户启动且 PLAN 写明范围后添加，未启用的选修不影响首轮完成。2026-11-18按“生成CH20内容”启用Allocator方向第一节，2026-11-19按“生成CH21内容”启用第二节跨stream生命周期，范围见PLAN第6节，首轮仍为Ch00～19。
 
 ## 工作量记录口径
 
@@ -903,3 +904,33 @@ Graph控制将start Event→同kernel→stop Event连成一次提交，更新ker
 本次只读复核11月18日两份正式NSYS SQLite。按对应malloc/free的Runtime行累计`end-start`得普通/异步15.422604/0.349550ms。把同stream每轮的H2D/H2D/memset/kernel/D2H五段GPU活动按时间排序，各批累计0.410031/0.314023ms。相邻轮D2H结束到下一轮H2D开始的31段累计18.833302/1.788738ms。仅在CPU轨上取前轮同步结束到后轮第一次memcpy API开始的31段，中位数446.841/5.751μs，普通段内为三次free和三次malloc，异步段内为三次mallocAsync。独立采集数值不拼成普通bench差值，CPU与GPU观察区间也不相加。池保留与释放提交顺序同时不同，现有对照不分摊二者的独立收益。
 
 用户曾把异步理解为提交释放后直接进入下一轮，讲解后已主动指出两条路径每轮都有三次释放、都等释放完成、计算仍访问global memory。记为具体理解证据。个人构建、运行与完整独立解释尚待验收，Ch20仍为RUNNING、掌握度未完整评估，实际学习和工程用时均未记录。总结时未重编译、运行GPU、重采NSYS或重复Sanitizer，复测与驱动诊断均按此前已保存的证据记录。本次无需额外Claude审阅。
+
+## 2026-11-19：Ch21跨stream异步分配生命周期骨架与预检
+
+用户要求“生成CH21内容”，按PLAN第6节启用Allocator方向第二节，依赖Ch15/20，预算45～60分钟。Codex生成独立的`CH21/cross_stream_lifetime.cu`、`CH21/compile.sh`与[讲义](chapters/21_cross_stream_lifetime.md)，同步PLAN、NOTE入口与ENVIRONMENT能力核验。固定32轮、N=1000、float32、grid8/block128；owner队列申请、上传和释放，worker队列初始化、计算和回读，只改变ready/done两处交接采用CPU等待还是Event设备等待。GPU链有意保持按轮串行，不以重叠或加速为验收要求。
+
+正式源码保留`wait_until_ready`和`wait_until_unused`两处TODO，安全CPU等待占位；`check`明确报告回退，未完成时拒绝event路线的bench/trace。正式骨架编译无警告，两路线各32000项正确、最大误差0、分配/释放96/96，event仍为host_waits=64/device_waits=0。隔离副本仅补TODO1后为32/32，性能运行仍按预期返回2；完整补全副本host为64/0、event为0/64，两路线全量数值与调用数通过。正式骨架及完整补全副本均通过memcheck（padding32、leak-check full、stream-ordered-races all），零错误、零泄漏。未完成路线拒绝性能运行后仍清理并trim。
+
+现场GTX1650/CC7.5/4096MiB、驱动610.88、NVCC12.9.86、Runtime12090、DriverAPI13030、Compute Sanitizer2025.2.1、NSYS2026.4.1、memory_pools_supported=1。完整补全版独立普通bench每策略预热3批、交替顺序21批，host整批中位数为host3702.467μs、event4261.529μs，event未加速；该差值未做驱动内部原因拆分，也不代表kernel本身变化。host计时包括本批分配、传输、初始化、计算提交、等待和释放，Event/stream创建、输入准备、池配置、CPU校验和trim在外。
+
+独立NSYS两份各96次mallocAsync、96次freeAsync、64次EventRecord、4次stream同步；交接分别为64次EventSynchronize与64次StreamWaitEvent。GPU均为32个kernel、64次H2D、32次D2H和32次memset，传输/初始化每次4000字节，H2D在owner、其余GPU活动在worker，每轮及轮间顺序核查通过，无活动重叠。释放同步后池used=0/reserved=32MiB，trim后均为0。原始命令、环境、源码/二进制哈希、退出码及数值见[预检日志](../reports/CH21/preflight-2026-11-19.txt)；[预检脚本](../reports/CH21/preflight-2026-11-19-run.py)保留临时补全方法，NSYS报告和SQLite为`reports/CH21/preflight-{host,event}-2026-11-19.*`，[分析脚本](../reports/CH21/preflight-2026-11-19-analysis.py)和[计数/端点JSON](../reports/CH21/trace-counts-2026-11-19.json)保留原始API名及版本后缀。未运行NCU或声称GUI验证；临时补全源码和二进制已清理，正式源码及build保持TODO骨架。
+
+本次用户完成部分仅为提出生成需求；源码、讲义、提示和工程预检由Codex提供，个人实现、运行与独立解释待验收，Ch21为READING，前章状态保持。实际学习用时与工程准备/agent执行耗时均未记录，不按聊天间隔估算。下一步由用户预测并运行骨架，再补两处设备依赖、重编译、检查全量输出及生命周期，解释ready与done各保护什么。范围已写入PLAN，无额外路线偏离；例行教学准备无需额外Claude审阅，未提交或推送Git。
+
+## 2026-11-24 Ch21 两处设备等待补全
+
+按用户要求完成TODO1和TODO2。`wait_until_ready()`把等待`ready`排入`worker`，`wait_until_unused()`把等待`done`排入`owner`。两个helper都检查`cudaStreamWaitEvent`的结果。删除骨架的CPU回退和性能运行拦截，按策略分别校验host与device等待次数。同步更新PLAN、讲义和NOTE。
+
+正式构建无警告。GTX1650 / CC7.5、驱动610.88、NVCC12.9.86、Runtime12090、DriverAPI13030。`check both`中每条路线的32,000项输出全部正确，最大误差0，申请和释放各96次。`host`路线为64次CPU等待，`event`路线为64次队列等待。Compute Sanitizer memcheck 2025.2.1（padding32、leak-check full、stream-ordered-races all）报告零错误、零泄漏。两路线同步释放后池used为0、reserved为32MiB，trim后均为0。
+
+普通bench按每路线3批预热、21批交替顺序采样，32轮整批耗时中位数为host 3807.623μs、event 4338.693μs。独立NSYS 2026.4.1报告分别确认64次EventSynchronize和64次StreamWaitEvent，两份各有96次申请和96次释放，GPU均为32个kernel、64次H2D、32次D2H、32次memset，按轮有序。命令、哈希和结果见[正式验证日志](../reports/CH21/completed-2026-11-24.txt)，原始报告及SQLite为`reports/CH21/completed-{host,event}-2026-11-24.*`，另有[结构化计数](../reports/CH21/completed-trace-counts-2026-11-24.json)。
+
+实现及验证由Codex执行，Ch21更新为RUNNING。个人运行和独立解释待验收，个人学习与工程准备耗时均未记录。本次工作符合PLAN第6节，无需额外Claude审阅。
+
+### 同日补充 CH21 交接耗时与整批耗时诊断
+
+用户追问为何交接API合计较短而整批仍可能较长。复核正式版哈希与两份原有NSYS SQLite，单独核算批末同步段与GPU活动。另对正式版执行10组普通bench，对两份临时副本分别执行两策略分段和四策略对照。分段把CPU循环末尾设为边界，`event`循环段从3.773 ms缩至1.887 ms，批末同步段由0.002 ms增至2.457 ms。原正式版10组里`host`快6组、`event`快4组。两种诊断的数值和memcheck均通过，临时源码及二进制已清理，正式课程状态为RUNNING。数据及限制见[讲义中的计时诊断](chapters/21_cross_stream_lifetime.md#为什么交接-api-更短整批却可能更长)，个人运行和解释待验收。
+
+### 同日 Ch21 学习总结
+
+按用户要求，在 NOTE 汇总两条跨 stream 依赖、命令行模式、创建标志、计时口径与实际提问，补充自测。核对正式源码和二进制哈希、既有校验和诊断日志。此次只整理已有证据。两处 TODO、构建和工具验证由 Codex 执行，用户已就源码与结果提问，个人运行和独立解释待验收。状态为 RUNNING，个人学习和工程准备实际用时均未记录。[Ch21 学习总结](NOTE.md#2026-11-24-ch21跨-stream-异步分配的使用与释放)
