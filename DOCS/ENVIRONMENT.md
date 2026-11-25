@@ -46,3 +46,7 @@ CLI的 --cuda-event-trace 默认false；本次启用true成功采到两个设备
 ## 2026-11-19 Ch21跨stream异步分配生命周期核验
 
 现场复核GTX1650/4096MiB/CC7.5、驱动610.88、NVCC12.9.86、Runtime12090、DriverAPI13030、Compute Sanitizer2025.2.1、NSYS2026.4.1、memory_pools_supported=1。隔离补全副本验证了owner队列分配/上传→worker队列访问/回读→owner队列释放的两处Event依赖；全量数值、memcheck（stream-ordered-races all及leak-check full）和独立NSYS计数/工作顺序均通过。两策略固定64MiB阈值，最终释放同步后used=0/reserved=32MiB，trim后均为0。证据见[CH21预检日志](../reports/CH21/preflight-2026-11-19.txt)与[讲义](chapters/21_cross_stream_lifetime.md)。正式源码仍保留两处TODO；这里只核验本例跨队列生命周期，不声明自定义pool、多GPU、VMM或任意框架路径可用。
+
+## 2026-11-24 Ch22 VMM 支持核验
+
+WSL2 `6.18.33.2-microsoft-standard-WSL2`、GTX 1650 / 4096 MiB / CC 7.5，驱动 610.88、NVCC 12.9.86、Runtime 12090、Driver API 13030。程序查得 `CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED=1`。设备本地且无导出句柄的配置返回最小粒度 2 MiB，实际完成预留 4 MiB 虚拟地址，分两段映射和授权、连续回读、解除映射并清理。Compute Sanitizer 2025.2.1 memcheck 含泄漏检查通过。[Ch22 预检日志](../reports/CH22/preflight-2026-11-24.txt)

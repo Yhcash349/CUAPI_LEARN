@@ -136,6 +136,16 @@ pool是CUDA管理的空间储备。used表示应用正在使用的分配，reser
 
 本页末尾的 [Ch21 总结](#2026-11-24-ch21跨-stream-异步分配的使用与释放) 收录本章的参数、两处交接和计时追问。
 
+## Ch22 阅读入口（2026-11-24，首轮后选修）
+
+程序预留从 `base` 开始的 `2G` 字节，起初只给前 `G` 字节接入显存。若 `G=2MiB`，第二段开始于 `base+2097152` 字节，也就是以 `uint32_t` 计的第 `524288` 项。扩容时只写第 `524288` 项及之后的元素，从原来的 `base` 一次回读两段就能同时检验旧数据和新增数据。[Ch22 VMM 讲义](chapters/22_virtual_memory.md)
+
+`cuMemAddressReserve` 写回地址，`cuMemCreate` 写回设备内存句柄。给第二段调用 `cuMemMap` 时，目标地址是 `base+G`，句柄内偏移仍是 0，因为第二段用的是另一块分配的开头。映射建立后再用 `cuMemSetAccess` 让目标 GPU 可读写，随后就可以在 kernel 里把两段当作连续数组。回读完成后依次解除每段映射并释放各自的句柄，最后归还原地址预留。[CUDA Driver VMM 接口](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-driver-api/group__CUDA__VA.html)
+
+2026-11-25 两处 TODO 已按用户要求补全。沿 `make_writable()` 看，`map_chunk()` 映射成功后才记录 `chunk.mapped = true`，所以即使后续权限设置失败，退出时也能解除已建立的映射。`grant_access()` 接收一份 `CUmemAccessDesc`，里面保存目标 GPU 和读写标志，`cuMemSetAccess` 的第四个参数 1 表示描述符数量。对同一个地址先后调用 `cuMemGetAccess`，本机观察到 `0x0 → 0x3`。[CH22 源码](../CH22/vmm_grow.cu)
+
+本页末尾的 [Ch22 总结](#2026-11-25-ch22用-vmm-保持基地址并扩容) 汇总初始化、分配粒度、地址与句柄、访问权限和两次 kernel 写入，并附自测。
+
 ## 首轮贯穿的观察问题
 
 | 观察问题 | 将使用的程序证据 |
@@ -2135,3 +2145,32 @@ Event不测某个线程，也不把1024个线程的耗时相加。stop排在该�
 沿第 0 轮说出 `ready` 和 `done` 各由谁记录、由谁等待。把 `done` 移到 kernel 后、D2H 前，释放会失去对哪次访问的保护？把两次交接从 CPU 等待换成队列等待后，为什么 GPU 仍逐轮执行？
 
 自己运行 `check both` 和 `bench both`，从输出解释 96/96 和 64 怎么来。再指出 NSYS 中 `cudaStreamWaitEvent` 的 CPU 区间和普通 `bench` 的起止，并用分段数据解释为什么循环更短而整批可以更长。
+
+## 2026-11-25 Ch22：用 VMM 保持基地址并扩容
+
+### 沿实验走一遍
+
+程序查询本机这类设备 VMM 分配的最小粒度，得到 `G = 2 MiB`。用 `cuMemAddressReserve` 一次预留 `2G = 4 MiB` 的连续虚拟地址，把起点写进 `window.base`。先申请、映射并授权前 `G` 字节，写入并回读前半段。扩容时只为后半段新增一块显存并授权，kernel 仍用原来的 `base`，但写入范围从 `count` 开始。最后从同一个 `base` 一次回读全部数据。[实验主流程](../CH22/vmm_grow.cu#L128)
+
+| 阶段 | 写入区间 | 数据规则 | 本次回读 |
+| --- | --- | --- | --- |
+| 前半段就绪 | `[0, 524288)` | `base[i] = i + 1000` | 前 524,288 项 |
+| 后半段就绪 | `[524288, 1048576)` | `base[i] = i + 2000` | 全部 1,048,576 项 |
+
+两个 kernel 都按 `begin + blockIdx.x * blockDim.x + threadIdx.x` 计算下标。扩容时，第一个线程写 `base[524288] = 526288`，对应 `base + 2 MiB`。最终逐项检查两个区间均零偏差，前半段最后一项为 525,287，扩容前后相同。这个结果验证了保留基地址和旧数据后，仍能从该地址连续读到新增数据。实际物理布局需要额外证据才能判断。[写入与校验](../CH22/vmm_grow.cu#L89) · [正式运行输出](../reports/CH22/completed-2026-11-25.txt)
+
+### 本章追问
+
+**为什么有 `cuInit(0)`，后面还调用 `cudaSetDevice(0)`？** 本章先用 Driver API 查询设备句柄与 VMM 能力，因此先显式初始化当前进程的 Driver API，`cuInit` 的 `0` 是保留标志。`cudaSetDevice` 的 `0` 是设备编号，在本章使用的 CUDA 12.9 中，它会初始化 GPU 0 的 primary context 并绑定到当前 CPU 线程。只用 Runtime API 时，Runtime 可以在首次需要时自动初始化。[Driver 初始化](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-driver-api/group__CUDA__INITIALIZE.html) · [CUDA 初始化说明](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-c-programming-guide/index.html#initialization)
+
+**`Window`、`first.address` 和 `chunk.handle` 分别存什么？** `Window` 是 CPU 侧的记录，保存整段的起点、每段字节数和两个 `Chunk`。第一段的 `address` 取自 `window.base`，第二段的 `address` 是 `base + G`。调用 `create_backing(first, ...)` 时，形参 `chunk` 引用 `first`，所以 `cuMemCreate(&chunk.handle, ...)` 把分配句柄写入 `first.handle`。`cuMemMap` 读取目标虚拟地址和分配句柄，把这一块显存接到指定位置。两次映射都从各自分配的第 0 字节开始。[结构体与映射代码](../CH22/vmm_grow.cu#L42)
+
+**`prop`、`access` 和两个模式怎么用？** `prop` 描述要申请的内存类型和位置。`cuMemGetAllocationGranularity` 从 `&prop` 读取配置，把字节数写入 `&window.chunk_bytes`。`probe` 到第一块显存申请成功就返回，日志里的 `mapped_bytes=0` 说明尚未建立映射。`check` 继续为映射授权。`CUmemAccessDesc` 描述目标设备和权限，本章两段都给 GPU 0 读写，所以复用同一个 `const` 描述符。`cuMemSetAccess(address, bytes, &access, 1)` 从 `&access` 读取一条规则，应用到指定地址范围。`cuMemGetAccess` 分别写回 `before` 和 `after`，本机两段都是 `0x0 → 0x3`。[配置和权限调用](../CH22/vmm_grow.cu#L69) · [CUDA VMM 文档](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-driver-api/group__CUDA__VA.html)
+
+**各资源何时释放？** `fill()` 等 kernel 完成，`verify()` 完成回读。退出时，`release_window()` 据 `mapped` 和 `created` 标志分别调用 `cuMemUnmap` 和 `cuMemRelease`，最后用原来的 `base` 与总长度归还虚拟地址。每段的申请和映射各有一个成功标志，所以 `probe` 与 `check` 可走同一条清理路径。[清理代码](../CH22/vmm_grow.cu#L168)
+
+### 自测
+
+1. 用第一段说明 `cuMemAddressReserve` 和 `cuMemCreate` 分别写回什么，为何 `cuMemMap` 需要同时传入它们。
+2. 给第二段做映射时，为什么目标地址是 `base + G`，分配内偏移仍是 `0`？刚映射完成时，`cuMemGetAccess` 查询到什么？
+3. 运行 `check`，用 `prefix`、`grown` 的基地址、校验数量和边界值，分别说明扩容前、扩容时写了哪一段，为什么回读能覆盖两块独立的显存分配，以及退出时如何清理。
